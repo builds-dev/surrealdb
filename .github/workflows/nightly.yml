@@ -122,12 +122,12 @@ jobs:
         env:
           BINDGEN_EXTRA_CLANG_ARGS_aarch64-unknown-linux-gnu: "-I/usr/aarch64-linux-gnu/include/"
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v1-node16
-        with:
-          aws-region: us-east-2
-          aws-access-key-id: ${{ secrets.AMAZON_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AMAZON_SECRET_KEY }}
+      # - name: Configure AWS
+      #   uses: aws-actions/configure-aws-credentials@v1-node16
+      #   with:
+      #     aws-region: us-east-2
+      #     aws-access-key-id: ${{ secrets.AMAZON_ACCESS_KEY }}
+      #     aws-secret-access-key: ${{ secrets.AMAZON_SECRET_KEY }}
 
       - name: Package binaries
         if: ${{ !contains(matrix.arch, 'windows') }}
@@ -162,68 +162,68 @@ jobs:
             target/${{ matrix.arch }}/release/${{ matrix.file }}.txt
             target/${{ matrix.arch }}/release/${{ matrix.file }}.exe
 
-  package:
-    name: Package macOS
-    needs: [build]
-    runs-on: macos-11
-    steps:
+  # package:
+  #   name: Package macOS
+  #   needs: [build]
+  #   runs-on: macos-11
+  #   steps:
 
-      - name: Download amd64 binary
-        uses: actions/download-artifact@v3
-        with:
-          name: surreal-nightly.darwin-amd64
-          path: amd64
+  #     - name: Download amd64 binary
+  #       uses: actions/download-artifact@v3
+  #       with:
+  #         name: surreal-nightly.darwin-amd64
+  #         path: amd64
 
-      - name: Download arm64 binary
-        uses: actions/download-artifact@v3
-        with:
-          name: surreal-nightly.darwin-arm64
-          path: arm64
+  #     - name: Download arm64 binary
+  #       uses: actions/download-artifact@v3
+  #       with:
+  #         name: surreal-nightly.darwin-arm64
+  #         path: arm64
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v1-node16
-        with:
-          aws-region: us-east-2
-          aws-access-key-id: ${{ secrets.AMAZON_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AMAZON_SECRET_KEY }}
+  #     - name: Configure AWS
+  #       uses: aws-actions/configure-aws-credentials@v1-node16
+  #       with:
+  #         aws-region: us-east-2
+  #         aws-access-key-id: ${{ secrets.AMAZON_ACCESS_KEY }}
+  #         aws-secret-access-key: ${{ secrets.AMAZON_SECRET_KEY }}
 
-      - name: Package universal binary
-        shell: bash
-        run: |
-          FILE="surreal-nightly.darwin-universal"
-          lipo -create -output surreal amd64/surreal arm64/surreal
-          chmod +x surreal
-          tar -zcvf $FILE.tgz surreal
-          echo $(shasum -a 256 $FILE.tgz | cut -f1 -d' ') > $FILE.txt
-          aws s3 cp --cache-control 'no-store' $FILE.tgz s3://download.surrealdb.com/nightly/
-          aws s3 cp --cache-control 'no-store' $FILE.txt s3://download.surrealdb.com/nightly/
+  #     - name: Package universal binary
+  #       shell: bash
+  #       run: |
+  #         FILE="surreal-nightly.darwin-universal"
+  #         lipo -create -output surreal amd64/surreal arm64/surreal
+  #         chmod +x surreal
+  #         tar -zcvf $FILE.tgz surreal
+  #         echo $(shasum -a 256 $FILE.tgz | cut -f1 -d' ') > $FILE.txt
+  #         aws s3 cp --cache-control 'no-store' $FILE.tgz s3://download.surrealdb.com/nightly/
+  #         aws s3 cp --cache-control 'no-store' $FILE.txt s3://download.surrealdb.com/nightly/
 
-  deploy:
-    name: Deploy
-    needs: [package]
-    runs-on: ubuntu-20.04
-    steps:
+  # deploy:
+  #   name: Deploy
+  #   needs: [package]
+  #   runs-on: ubuntu-20.04
+  #   steps:
 
-      - name: Checkout sources
-        uses: actions/checkout@v3
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v3
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v1-node16
-        with:
-          aws-region: us-east-2
-          aws-access-key-id: ${{ secrets.AMAZON_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AMAZON_SECRET_KEY }}
+  #     - name: Configure AWS
+  #       uses: aws-actions/configure-aws-credentials@v1-node16
+  #       with:
+  #         aws-region: us-east-2
+  #         aws-access-key-id: ${{ secrets.AMAZON_ACCESS_KEY }}
+  #         aws-secret-access-key: ${{ secrets.AMAZON_SECRET_KEY }}
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v3
+  #     - name: Download artifacts
+  #       uses: actions/download-artifact@v3
 
-      - name: Distribute binaries
-        shell: bash
-        run: |
-          regions=("af-south-1" "ap-east-1" "ap-south-1" "ap-southeast-1" "ap-southeast-2" "ca-central-1" "eu-central-1" "eu-west-2" "me-south-1" "sa-east-1" "us-west-2")
-          for region in ${regions[@]}; do
-              aws s3 sync --delete --storage-class INTELLIGENT_TIERING --source-region eu-west-2 --region ${region} s3://download.surrealdb.com s3://download.${region}.surrealdb.com
-          done
+  #     - name: Distribute binaries
+  #       shell: bash
+  #       run: |
+  #         regions=("af-south-1" "ap-east-1" "ap-south-1" "ap-southeast-1" "ap-southeast-2" "ca-central-1" "eu-central-1" "eu-west-2" "me-south-1" "sa-east-1" "us-west-2")
+  #         for region in ${regions[@]}; do
+  #             aws s3 sync --delete --storage-class INTELLIGENT_TIERING --source-region eu-west-2 --region ${region} s3://download.surrealdb.com s3://download.${region}.surrealdb.com
+  #         done
 
   docker:
     name: Docker
