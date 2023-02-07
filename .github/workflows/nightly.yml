@@ -276,4 +276,4 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: surrealdb/surrealdb:nightly
+          tags: buildsdev/surrealdb:nightly
