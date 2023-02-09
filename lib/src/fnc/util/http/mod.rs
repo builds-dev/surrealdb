@@ -49,7 +49,7 @@ pub async fn get(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
-			Some(mime) if mime == "application/json" => Ok(res.json().await?),
+			// Some(mime) if mime == "application/json" => Ok(res.json().await?),
 			_ => Ok(res.text().await?.into()),
 		},
 		s => Err(Error::Http(s.canonical_reason().unwrap_or_default().to_owned())),
@@ -78,7 +78,7 @@ pub async fn put(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<Va
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
-			Some(mime) if mime == "application/json" => Ok(res.json().await?),
+			// Some(mime) if mime == "application/json" => Ok(res.json().await?),
 			_ => Ok(res.text().await?.into()),
 		},
 		s => Err(Error::Http(s.canonical_reason().unwrap_or_default().to_owned())),
@@ -107,7 +107,7 @@ pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<V
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
-			Some(mime) if mime == "application/json" => Ok(res.json().await?),
+			// Some(mime) if mime == "application/json" => Ok(res.json().await?),
 			_ => Ok(res.text().await?.into()),
 		},
 		s => Err(Error::Http(s.canonical_reason().unwrap_or_default().to_owned())),
@@ -136,7 +136,7 @@ pub async fn patch(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
-			Some(mime) if mime == "application/json" => Ok(res.json().await?),
+			// Some(mime) if mime == "application/json" => Ok(res.json().await?),
 			_ => Ok(res.text().await?.into()),
 		},
 		s => Err(Error::Http(s.canonical_reason().unwrap_or_default().to_owned())),
@@ -161,7 +161,7 @@ pub async fn delete(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
-			Some(mime) if mime == "application/json" => Ok(res.json().await?),
+			// Some(mime) if mime == "application/json" => Ok(res.json().await?),
 			_ => Ok(res.text().await?.into()),
 		},
 		s => Err(Error::Http(s.canonical_reason().unwrap_or_default().to_owned())),
