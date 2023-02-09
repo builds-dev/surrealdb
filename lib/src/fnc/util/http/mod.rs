@@ -94,17 +94,28 @@ pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<V
 	if cfg!(not(target_arch = "wasm32")) {
 		req = req.header("User-Agent", "SurrealDB");
 	}
+
+	let mut req_is_json = false;
+
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
+		if k.as_str().starts_with("application/json") {
+			req_is_json = true;
+		}
 		req = req.header(k.as_str(), v.to_strand().as_str());
 	}
 	// Submit the request body
 	if body.is_some() {
-		req = req.json(&body);
+		if req_is_json {
+			req = req.json(&body);
+		} else {
+			req = req.body(body.as_string())
+		}
 	}
 	// Send the request and wait
 	let res = req.send().await?;
 	// Check the response status
+
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
 			// Some(mime) if mime == "application/json" => Ok(res.json().await?),
