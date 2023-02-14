@@ -124,7 +124,9 @@ pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<V
 
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
-		if k.as_str().to_lowercase() == "content-type" && v.to_strand().as_str().starts_with("application/json") {
+		if k.as_str().to_lowercase() == "content-type"
+			&& v.to_strand().as_str().starts_with("application/json")
+		{
 			req_is_json = true;
 		}
 		req = req.header(k.as_str(), v.to_strand().as_str());
