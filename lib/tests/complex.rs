@@ -28,7 +28,6 @@ use surrealdb::sql::Value;
 //		Ok(())
 //	})
 //}
-
 #[test]
 //fn cyclic_fields() -> Result<(), Error> {
 //	// Ensure a good stack size for tests
