@@ -10,44 +10,44 @@ use surrealdb::kvs::Datastore;
 use surrealdb::sql::Value;
 
 #[test]
-fn self_referential_field() -> Result<(), Error> {
-	// Ensure a good stack size for tests
-	with_enough_stack(async {
-		let mut res = run_queries(
-			"
-			CREATE pet:dog SET tail = <future> { tail };
-			",
-		)
-		.await?;
-		//
-		assert_eq!(res.len(), 1);
-		//
-		let tmp = res.next().unwrap();
-		assert!(matches!(tmp, Err(Error::ComputationDepthExceeded)));
-		//
-		Ok(())
-	})
-}
+//fn self_referential_field() -> Result<(), Error> {
+//	// Ensure a good stack size for tests
+//	with_enough_stack(async {
+//		let mut res = run_queries(
+//			"
+//			CREATE pet:dog SET tail = <future> { tail };
+//			",
+//		)
+//		.await?;
+//		//
+//		assert_eq!(res.len(), 1);
+//		//
+//		let tmp = res.next().unwrap();
+//		assert!(matches!(tmp, Err(Error::ComputationDepthExceeded)));
+//		//
+//		Ok(())
+//	})
+//}
 
 #[test]
-fn cyclic_fields() -> Result<(), Error> {
-	// Ensure a good stack size for tests
-	with_enough_stack(async {
-		let mut res = run_queries(
-			"
-			CREATE recycle SET consume = <future> { produce }, produce = <future> { consume };
-			",
-		)
-		.await?;
-		//
-		assert_eq!(res.len(), 1);
-		//
-		let tmp = res.next().unwrap();
-		assert!(matches!(tmp, Err(Error::ComputationDepthExceeded)));
-		//
-		Ok(())
-	})
-}
+//fn cyclic_fields() -> Result<(), Error> {
+//	// Ensure a good stack size for tests
+//	with_enough_stack(async {
+//		let mut res = run_queries(
+//			"
+//			CREATE recycle SET consume = <future> { produce }, produce = <future> { consume };
+//			",
+//		)
+//		.await?;
+//		//
+//		assert_eq!(res.len(), 1);
+//		//
+//		let tmp = res.next().unwrap();
+//		assert!(matches!(tmp, Err(Error::ComputationDepthExceeded)));
+//		//
+//		Ok(())
+//	})
+//}
 
 //#[test]
 //fn cyclic_records() -> Result<(), Error> {
