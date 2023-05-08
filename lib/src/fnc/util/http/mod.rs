@@ -1,3 +1,4 @@
+use crate::ctx::Context;
 use crate::err::Error;
 use crate::sql::json;
 use crate::sql::object::Object;
@@ -10,7 +11,7 @@ pub(crate) fn uri_is_valid(uri: &str) -> bool {
 	reqwest::Url::parse(uri).is_ok()
 }
 
-pub async fn head(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
+pub async fn head(ctx: &Context<'_>, uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
 	// Set a default client with no timeout
 	let cli = Client::builder().build()?;
 	// Start a new HEAD request
@@ -21,10 +22,14 @@ pub async fn head(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> 
 	}
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
-		req = req.header(k.as_str(), v.to_strand().as_str());
+		req = req.header(k.as_str(), v.to_raw_string());
 	}
 	// Send the request and wait
-	let res = req.send().await?;
+	let res = match ctx.timeout() {
+		#[cfg(not(target_arch = "wasm32"))]
+		Some(d) => req.timeout(d).send().await?,
+		_ => req.send().await?,
+	};
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => Ok(Value::None),
@@ -32,7 +37,7 @@ pub async fn head(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> 
 	}
 }
 
-pub async fn get(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
+pub async fn get(ctx: &Context<'_>, uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
 	// Set a default client with no timeout
 	let cli = Client::builder().build()?;
 	// Start a new GET request
@@ -43,10 +48,14 @@ pub async fn get(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
 	}
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
-		req = req.header(k.as_str(), v.to_strand().as_str());
+		req = req.header(k.as_str(), v.to_raw_string());
 	}
 	// Send the request and wait
-	let res = req.send().await?;
+	let res = match ctx.timeout() {
+		#[cfg(not(target_arch = "wasm32"))]
+		Some(d) => req.timeout(d).send().await?,
+		_ => req.send().await?,
+	};
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
@@ -69,7 +78,12 @@ pub async fn get(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
 	}
 }
 
-pub async fn put(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<Value, Error> {
+pub async fn put(
+	ctx: &Context<'_>,
+	uri: Strand,
+	body: Value,
+	opts: impl Into<Object>,
+) -> Result<Value, Error> {
 	// Set a default client with no timeout
 	let cli = Client::builder().build()?;
 	// Start a new GET request
@@ -80,14 +94,18 @@ pub async fn put(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<Va
 	}
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
-		req = req.header(k.as_str(), v.to_strand().as_str());
+		req = req.header(k.as_str(), v.to_raw_string());
 	}
 	// Submit the request body
 	if body.is_some() {
 		req = req.json(&body);
 	}
 	// Send the request and wait
-	let res = req.send().await?;
+	let res = match ctx.timeout() {
+		#[cfg(not(target_arch = "wasm32"))]
+		Some(d) => req.timeout(d).send().await?,
+		_ => req.send().await?,
+	};
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
@@ -110,7 +128,12 @@ pub async fn put(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<Va
 	}
 }
 
-pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<Value, Error> {
+pub async fn post(
+	ctx: &Context<'_>,
+	uri: Strand,
+	body: Value,
+	opts: impl Into<Object>,
+) -> Result<Value, Error> {
 	// Set a default client with no timeout
 	let cli = Client::builder().build()?;
 	// Start a new GET request
@@ -125,11 +148,12 @@ pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<V
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
 		if k.as_str().to_lowercase() == "content-type"
-			&& v.to_strand().as_str().starts_with("application/json")
+			&& v.to_raw_string().starts_with("application/json")
 		{
 			req_is_json = true;
 		}
-		req = req.header(k.as_str(), v.to_strand().as_str());
+		// req = req.header(k.as_str(), v.to_strand().as_str());
+		req = req.header(k.as_str(), v.to_raw_string());
 	}
 	// Submit the request body
 	if body.is_some() {
@@ -140,7 +164,11 @@ pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<V
 		}
 	}
 	// Send the request and wait
-	let res = req.send().await?;
+	let res = match ctx.timeout() {
+		#[cfg(not(target_arch = "wasm32"))]
+		Some(d) => req.timeout(d).send().await?,
+		_ => req.send().await?,
+	};
 	// Check the response status
 
 	match res.status() {
@@ -164,7 +192,12 @@ pub async fn post(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<V
 	}
 }
 
-pub async fn patch(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<Value, Error> {
+pub async fn patch(
+	ctx: &Context<'_>,
+	uri: Strand,
+	body: Value,
+	opts: impl Into<Object>,
+) -> Result<Value, Error> {
 	// Set a default client with no timeout
 	let cli = Client::builder().build()?;
 	// Start a new GET request
@@ -175,14 +208,18 @@ pub async fn patch(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<
 	}
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
-		req = req.header(k.as_str(), v.to_strand().as_str());
+		req = req.header(k.as_str(), v.to_raw_string());
 	}
 	// Submit the request body
 	if body.is_some() {
 		req = req.json(&body);
 	}
 	// Send the request and wait
-	let res = req.send().await?;
+	let res = match ctx.timeout() {
+		#[cfg(not(target_arch = "wasm32"))]
+		Some(d) => req.timeout(d).send().await?,
+		_ => req.send().await?,
+	};
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {
@@ -205,7 +242,11 @@ pub async fn patch(uri: Strand, body: Value, opts: impl Into<Object>) -> Result<
 	}
 }
 
-pub async fn delete(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error> {
+pub async fn delete(
+	ctx: &Context<'_>,
+	uri: Strand,
+	opts: impl Into<Object>,
+) -> Result<Value, Error> {
 	// Set a default client with no timeout
 	let cli = Client::builder().build()?;
 	// Start a new GET request
@@ -216,10 +257,14 @@ pub async fn delete(uri: Strand, opts: impl Into<Object>) -> Result<Value, Error
 	}
 	// Add specified header values
 	for (k, v) in opts.into().iter() {
-		req = req.header(k.as_str(), v.to_strand().as_str());
+		req = req.header(k.as_str(), v.to_raw_string());
 	}
 	// Send the request and wait
-	let res = req.send().await?;
+	let res = match ctx.timeout() {
+		#[cfg(not(target_arch = "wasm32"))]
+		Some(d) => req.timeout(d).send().await?,
+		_ => req.send().await?,
+	};
 	// Check the response status
 	match res.status() {
 		s if s.is_success() => match res.headers().get(CONTENT_TYPE) {

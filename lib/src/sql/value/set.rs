@@ -2,16 +2,17 @@ use crate::ctx::Context;
 use crate::dbs::Options;
 use crate::dbs::Transaction;
 use crate::err::Error;
+use crate::exe::try_join_all_buffered;
 use crate::sql::part::Next;
 use crate::sql::part::Part;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
-use futures::future::try_join_all;
 
 impl Value {
+	/// Asynchronous method for setting a field on a `Value`
 	#[cfg_attr(not(target_arch = "wasm32"), async_recursion)]
 	#[cfg_attr(target_arch = "wasm32", async_recursion(?Send))]
-	pub async fn set(
+	pub(crate) async fn set(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
@@ -24,15 +25,6 @@ impl Value {
 			Some(p) => match self {
 				// Current path part is an object
 				Value::Object(v) => match p {
-					Part::Thing(t) => match v.get_mut(t.to_raw().as_str()) {
-						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
-						_ => {
-							let mut obj = Value::base();
-							obj.set(ctx, opt, txn, path.next(), val).await?;
-							v.insert(t.to_raw(), obj);
-							Ok(())
-						}
-					},
 					Part::Graph(g) => match v.get_mut(g.to_raw().as_str()) {
 						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
 						_ => {
@@ -58,7 +50,7 @@ impl Value {
 					Part::All => {
 						let path = path.next();
 						let futs = v.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
-						try_join_all(futs).await?;
+						try_join_all_buffered(futs).await?;
 						Ok(())
 					}
 					Part::First => match v.first_mut() {
@@ -84,7 +76,7 @@ impl Value {
 					}
 					_ => {
 						let futs = v.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
-						try_join_all(futs).await?;
+						try_join_all_buffered(futs).await?;
 						Ok(())
 					}
 				},

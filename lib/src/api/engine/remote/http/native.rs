@@ -1,17 +1,14 @@
 use super::Client;
-use super::LOG;
 use crate::api::conn::Connection;
 use crate::api::conn::DbResponse;
 use crate::api::conn::Method;
 use crate::api::conn::Param;
 use crate::api::conn::Route;
 use crate::api::conn::Router;
-use crate::api::opt::from_value;
 use crate::api::opt::Endpoint;
 #[cfg(any(feature = "native-tls", feature = "rustls"))]
 use crate::api::opt::Tls;
 use crate::api::ExtraFeatures;
-use crate::api::Response as QueryResponse;
 use crate::api::Result;
 use crate::api::Surreal;
 use flume::Receiver;
@@ -19,10 +16,7 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use once_cell::sync::OnceCell;
 use reqwest::header::HeaderMap;
-use reqwest::header::HeaderValue;
-use reqwest::header::ACCEPT;
 use reqwest::ClientBuilder;
-use serde::de::DeserializeOwned;
 use std::collections::HashSet;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -45,8 +39,7 @@ impl Connection for Client {
 		capacity: usize,
 	) -> Pin<Box<dyn Future<Output = Result<Surreal<Self>>> + Send + Sync + 'static>> {
 		Box::pin(async move {
-			let mut headers = HeaderMap::new();
-			headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+			let headers = super::default_headers();
 
 			#[allow(unused_mut)]
 			let mut builder = ClientBuilder::new().default_headers(headers);
@@ -102,37 +95,6 @@ impl Connection for Client {
 			};
 			router.sender.send_async(Some(route)).await?;
 			Ok(receiver)
-		})
-	}
-
-	fn recv<R>(
-		&mut self,
-		rx: Receiver<Result<DbResponse>>,
-	) -> Pin<Box<dyn Future<Output = Result<R>> + Send + Sync + '_>>
-	where
-		R: DeserializeOwned,
-	{
-		Box::pin(async move {
-			let response = rx.into_recv_async().await?;
-			trace!(target: LOG, "Response {response:?}");
-			match response? {
-				DbResponse::Other(value) => from_value(value),
-				DbResponse::Query(..) => unreachable!(),
-			}
-		})
-	}
-
-	fn recv_query(
-		&mut self,
-		rx: Receiver<Result<DbResponse>>,
-	) -> Pin<Box<dyn Future<Output = Result<QueryResponse>> + Send + Sync + '_>> {
-		Box::pin(async move {
-			let response = rx.into_recv_async().await?;
-			trace!(target: LOG, "Response {response:?}");
-			match response? {
-				DbResponse::Query(results) => Ok(results),
-				DbResponse::Other(..) => unreachable!(),
-			}
 		})
 	}
 }

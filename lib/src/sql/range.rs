@@ -17,7 +17,10 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Bound;
 
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Range";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Range")]
 pub struct Range {
 	pub tb: String,
 	pub beg: Bound<Id>,

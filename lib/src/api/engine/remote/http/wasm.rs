@@ -6,10 +6,8 @@ use crate::api::conn::Method;
 use crate::api::conn::Param;
 use crate::api::conn::Route;
 use crate::api::conn::Router;
-use crate::api::opt::from_value;
 use crate::api::opt::Endpoint;
 use crate::api::ExtraFeatures;
-use crate::api::Response as QueryResponse;
 use crate::api::Result;
 use crate::api::Surreal;
 use flume::Receiver;
@@ -18,10 +16,7 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use once_cell::sync::OnceCell;
 use reqwest::header::HeaderMap;
-use reqwest::header::HeaderValue;
-use reqwest::header::ACCEPT;
 use reqwest::ClientBuilder;
-use serde::de::DeserializeOwned;
 use std::collections::HashSet;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -88,42 +83,10 @@ impl Connection for Client {
 			Ok(receiver)
 		})
 	}
-
-	fn recv<R>(
-		&mut self,
-		rx: Receiver<Result<DbResponse>>,
-	) -> Pin<Box<dyn Future<Output = Result<R>> + Send + Sync + '_>>
-	where
-		R: DeserializeOwned,
-	{
-		Box::pin(async move {
-			let response = rx.into_recv_async().await?;
-			trace!(target: LOG, "Response {response:?}");
-			match response? {
-				DbResponse::Other(value) => from_value(value),
-				DbResponse::Query(..) => unreachable!(),
-			}
-		})
-	}
-
-	fn recv_query(
-		&mut self,
-		rx: Receiver<Result<DbResponse>>,
-	) -> Pin<Box<dyn Future<Output = Result<QueryResponse>> + Send + Sync + '_>> {
-		Box::pin(async move {
-			let response = rx.into_recv_async().await?;
-			trace!(target: LOG, "Response {response:?}");
-			match response? {
-				DbResponse::Query(results) => Ok(results),
-				DbResponse::Other(..) => unreachable!(),
-			}
-		})
-	}
 }
 
 async fn client(base_url: &Url) -> Result<reqwest::Client> {
-	let mut headers = HeaderMap::new();
-	headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+	let headers = super::default_headers();
 	let builder = ClientBuilder::new().default_headers(headers);
 	let client = builder.build()?;
 	let health = base_url.join(Method::Health.as_str())?;

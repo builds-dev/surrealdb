@@ -3,6 +3,8 @@
 pub(crate) mod algorithm;
 pub(crate) mod array;
 pub(crate) mod base;
+pub(crate) mod block;
+pub(crate) mod bytes;
 pub(crate) mod comment;
 pub(crate) mod common;
 pub(crate) mod cond;
@@ -62,7 +64,6 @@ pub(crate) mod view;
 #[cfg(test)]
 pub(crate) mod test;
 
-pub mod serde;
 pub mod statements;
 
 pub use self::parser::*;
@@ -70,6 +71,8 @@ pub use self::parser::*;
 pub use self::algorithm::Algorithm;
 pub use self::array::Array;
 pub use self::base::Base;
+pub use self::block::Block;
+pub use self::bytes::Bytes;
 pub use self::cond::Cond;
 pub use self::data::Data;
 pub use self::datetime::Datetime;
@@ -127,3 +130,5 @@ pub use self::value::Value;
 pub use self::value::Values;
 pub use self::version::Version;
 pub use self::view::View;
+
+pub use self::value::serde::to_value;

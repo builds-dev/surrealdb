@@ -14,7 +14,7 @@ use futures::future::try_join_all;
 impl Value {
 	#[cfg_attr(not(target_arch = "wasm32"), async_recursion)]
 	#[cfg_attr(target_arch = "wasm32", async_recursion(?Send))]
-	pub async fn fetch(
+	pub(crate) async fn fetch(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
@@ -81,7 +81,7 @@ impl Value {
 						// This is a graph traversal expression
 						Part::Graph(g) => {
 							let stm = SelectStatement {
-								expr: Fields(vec![Field::All]),
+								expr: Fields(vec![Field::All], false),
 								what: Values(vec![Value::from(Edges {
 									from: val,
 									dir: g.dir.clone(),
@@ -94,7 +94,7 @@ impl Value {
 								.compute(ctx, opt, txn, None)
 								.await?
 								.all()
-								.get(ctx, opt, txn, path.next())
+								.get(ctx, opt, txn, None, path.next())
 								.await?
 								.flatten()
 								.ok()?;
@@ -103,7 +103,7 @@ impl Value {
 						// This is a remote field expression
 						_ => {
 							let stm = SelectStatement {
-								expr: Fields(vec![Field::All]),
+								expr: Fields(vec![Field::All], false),
 								what: Values(vec![Value::from(val)]),
 								..SelectStatement::default()
 							};
@@ -129,7 +129,7 @@ impl Value {
 					let val = v.clone();
 					// Fetch the remote embedded record
 					let stm = SelectStatement {
-						expr: Fields(vec![Field::All]),
+						expr: Fields(vec![Field::All], false),
 						what: Values(vec![Value::from(val)]),
 						..SelectStatement::default()
 					};

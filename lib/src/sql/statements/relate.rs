@@ -12,7 +12,7 @@ use crate::sql::comment::shouldbespace;
 use crate::sql::data::{data, Data};
 use crate::sql::error::IResult;
 use crate::sql::output::{output, Output};
-use crate::sql::param::plain as param;
+use crate::sql::param::param;
 use crate::sql::subquery::subquery;
 use crate::sql::table::table;
 use crate::sql::thing::thing;
@@ -43,6 +43,16 @@ pub struct RelateStatement {
 impl RelateStatement {
 	pub(crate) fn writeable(&self) -> bool {
 		true
+	}
+
+	pub(crate) fn single(&self) -> bool {
+		match (&self.from, &self.with) {
+			(v, w) if v.is_object() && w.is_object() => true,
+			(v, w) if v.is_object() && w.is_thing() => true,
+			(v, w) if v.is_thing() && w.is_object() => true,
+			(v, w) if v.is_thing() && w.is_thing() => true,
+			_ => false,
+		}
 	}
 
 	pub(crate) async fn compute(

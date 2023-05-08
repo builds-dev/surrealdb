@@ -31,32 +31,34 @@ impl<I: IntoIterator<Item = T>, T: Display> Fmt<I, fn(I, &mut Formatter) -> fmt:
 		Self::new(into_iter, fmt_comma_separated)
 	}
 
+	/// Formats values with a verbar and a space separating them.
+	pub(crate) fn verbar_separated(into_iter: I) -> Self {
+		Self::new(into_iter, fmt_verbar_separated)
+	}
+
 	/// Formats values with a comma and a space separating them or, if pretty printing is in
 	/// effect, a comma, a newline, and indentation.
 	pub(crate) fn pretty_comma_separated(into_iter: I) -> Self {
-		Self::new(
-			into_iter,
-			if is_pretty() {
-				fmt_pretty_comma_separated
-			} else {
-				fmt_comma_separated
-			},
-		)
+		Self::new(into_iter, fmt_pretty_comma_separated)
 	}
 
 	/// Formats values with a new line separating them.
-	pub(crate) fn pretty_new_line_separated(into_iter: I) -> Self {
-		Self::new(into_iter, fmt_new_line_separated)
+	pub(crate) fn one_line_separated(into_iter: I) -> Self {
+		Self::new(into_iter, fmt_one_line_separated)
+	}
+
+	/// Formats values with a new line separating them.
+	pub(crate) fn two_line_separated(into_iter: I) -> Self {
+		Self::new(into_iter, fmt_two_line_separated)
 	}
 }
 
-fn fmt_comma_separated<T: Display>(
-	into_iter: impl IntoIterator<Item = T>,
+fn fmt_comma_separated<T: Display, I: IntoIterator<Item = T>>(
+	into_iter: I,
 	f: &mut Formatter,
 ) -> fmt::Result {
 	for (i, v) in into_iter.into_iter().enumerate() {
 		if i > 0 {
-			// This comma goes after the item formatted in the last iteration.
 			f.write_str(", ")?;
 		}
 		Display::fmt(&v, f)?;
@@ -64,29 +66,43 @@ fn fmt_comma_separated<T: Display>(
 	Ok(())
 }
 
-fn fmt_pretty_comma_separated<T: Display>(
-	into_iter: impl IntoIterator<Item = T>,
+fn fmt_verbar_separated<T: Display, I: IntoIterator<Item = T>>(
+	into_iter: I,
 	f: &mut Formatter,
 ) -> fmt::Result {
 	for (i, v) in into_iter.into_iter().enumerate() {
 		if i > 0 {
-			// We don't need a space after the comma if we are going to have a newline.
-			f.write_char(',')?;
-			pretty_sequence_item();
+			f.write_str(" | ")?;
 		}
 		Display::fmt(&v, f)?;
 	}
 	Ok(())
 }
 
-fn fmt_new_line_separated<T: Display>(
-	into_iter: impl IntoIterator<Item = T>,
+fn fmt_pretty_comma_separated<T: Display, I: IntoIterator<Item = T>>(
+	into_iter: I,
 	f: &mut Formatter,
 ) -> fmt::Result {
 	for (i, v) in into_iter.into_iter().enumerate() {
 		if i > 0 {
-			// One of the few cases where the raw string data depends on is pretty i.e. we don't
-			// need a space after the comma if we are going to have a newline.
+			if is_pretty() {
+				f.write_char(',')?;
+				pretty_sequence_item();
+			} else {
+				f.write_str(", ")?;
+			}
+		}
+		Display::fmt(&v, f)?;
+	}
+	Ok(())
+}
+
+fn fmt_one_line_separated<T: Display, I: IntoIterator<Item = T>>(
+	into_iter: I,
+	f: &mut Formatter,
+) -> fmt::Result {
+	for (i, v) in into_iter.into_iter().enumerate() {
+		if i > 0 {
 			if is_pretty() {
 				pretty_sequence_item();
 			} else {
@@ -98,14 +114,32 @@ fn fmt_new_line_separated<T: Display>(
 	Ok(())
 }
 
+fn fmt_two_line_separated<T: Display, I: IntoIterator<Item = T>>(
+	into_iter: I,
+	f: &mut Formatter,
+) -> fmt::Result {
+	for (i, v) in into_iter.into_iter().enumerate() {
+		if i > 0 {
+			if is_pretty() {
+				f.write_char('\n')?;
+				pretty_sequence_item();
+			} else {
+				f.write_char('\n')?;
+				f.write_char('\n')?;
+			}
+		}
+		Display::fmt(&v, f)?;
+	}
+	Ok(())
+}
+
 /// Creates a formatting function that joins iterators with an arbitrary separator.
-pub fn fmt_separated_by<T: Display, II: IntoIterator<Item = T>>(
+pub fn fmt_separated_by<T: Display, I: IntoIterator<Item = T>>(
 	separator: impl Display,
-) -> impl Fn(II, &mut Formatter) -> fmt::Result {
-	move |into_iter: II, f: &mut Formatter| {
+) -> impl Fn(I, &mut Formatter) -> fmt::Result {
+	move |into_iter: I, f: &mut Formatter| {
 		for (i, v) in into_iter.into_iter().enumerate() {
 			if i > 0 {
-				// This separator goes after the item formatted in the last iteration.
 				Display::fmt(&separator, f)?;
 			}
 			Display::fmt(&v, f)?;

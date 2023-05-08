@@ -1,20 +1,19 @@
 use crate::err::Error;
 use rustyline::error::ReadlineError;
-use rustyline::Editor;
-use serde_json::Value;
+use rustyline::DefaultEditor;
 use surrealdb::engine::any::connect;
 use surrealdb::error::Api as ApiError;
 use surrealdb::opt::auth::Root;
 use surrealdb::sql;
-use surrealdb::sql::statements::SetStatement;
 use surrealdb::sql::Statement;
+use surrealdb::sql::Value;
 use surrealdb::Error as SurrealError;
 use surrealdb::Response;
 
 #[tokio::main]
 pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
-	// Set the default logging level
-	crate::cli::log::init(0);
+	// Initialize opentelemetry and logging
+	crate::o11y::builder().with_log_level("warn").init();
 	// Parse all other cli arguments
 	let username = matches.value_of("user").unwrap();
 	let password = matches.value_of("pass").unwrap();
@@ -25,7 +24,7 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 	let pretty = matches.is_present("pretty");
 	// Connect to the database engine
 	let client = connect(endpoint).await?;
-	// Sign in to the server if the specified dabatabase engine supports it
+	// Sign in to the server if the specified database engine supports it
 	let root = Root {
 		username,
 		password,
@@ -40,7 +39,7 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 		}
 	}
 	// Create a new terminal REPL
-	let mut rl = Editor::<()>::new().unwrap();
+	let mut rl = DefaultEditor::new().unwrap();
 	// Load the command-line history
 	let _ = rl.load_history("history.txt");
 	// Configure the prompt
@@ -48,13 +47,28 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 	// Loop over each command-line input
 	loop {
 		// Use namespace / database if specified
-		if let (Some(namespace), Some(database)) = (&ns, &db) {
-			match client.use_ns(namespace).use_db(database).await {
+		match (&ns, &db) {
+			(Some(namespace), Some(database)) => {
+				match client.use_ns(namespace).use_db(database).await {
+					Ok(()) => {
+						prompt = format!("{namespace}/{database}> ");
+					}
+					Err(error) => eprintln!("{error}"),
+				}
+			}
+			(Some(namespace), None) => match client.use_ns(namespace).await {
 				Ok(()) => {
-					prompt = format!("{namespace}/{database}> ");
+					prompt = format!("{namespace}> ");
 				}
 				Err(error) => eprintln!("{error}"),
-			}
+			},
+			(None, Some(database)) => match client.use_db(database).await {
+				Ok(()) => {
+					prompt = format!("/{database}> ");
+				}
+				Err(error) => eprintln!("{error}"),
+			},
+			(None, None) => {}
 		}
 		// Prompt the user to input SQL
 		let readline = rl.readline(&prompt);
@@ -67,7 +81,9 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 					continue;
 				}
 				// Add the entry to the history
-				rl.add_history_entry(line.as_str());
+				if let Err(e) = rl.add_history_entry(line.as_str()) {
+					eprintln!("{e}");
+				}
 				// Complete the request
 				match sql::parse(&line) {
 					Ok(query) => {
@@ -81,12 +97,9 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 										db = Some(database.clone());
 									}
 								}
-								Statement::Set(SetStatement {
-									name,
-									what,
-								}) => {
-									if let Err(error) = client.set(name, what).await {
-										eprintln!("{error}");
+								Statement::Set(stmt) => {
+									if let Err(e) = client.set(&stmt.name, &stmt.what).await {
+										eprintln!("{e}\n");
 									}
 								}
 								_ => {}
@@ -95,11 +108,17 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 						let res = client.query(query).await;
 						// Get the request response
 						match process(pretty, res) {
-							Ok(v) => println!("{v}"),
-							Err(e) => eprintln!("{e}"),
+							Ok(v) => {
+								println!("{v}\n");
+							}
+							Err(e) => {
+								eprintln!("{e}\n");
+							}
 						}
 					}
-					Err(error) => eprintln!("{error}"),
+					Err(e) => {
+						eprintln!("{e}\n");
+					}
 				}
 			}
 			// The user types CTRL-C
@@ -111,8 +130,8 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 				break;
 			}
 			// There was en error
-			Err(err) => {
-				eprintln!("Error: {err:?}");
+			Err(e) => {
+				eprintln!("Error: {e:?}");
 				break;
 			}
 		}
@@ -124,19 +143,25 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 }
 
 fn process(pretty: bool, res: surrealdb::Result<Response>) -> Result<String, Error> {
-	// Catch any errors
-	let values: Vec<Value> = res?.take(0)?;
-	let value = Value::Array(values);
-	// Check if we should prettify
-	match pretty {
-		// Don't prettify the response
-		false => Ok(value.to_string()),
-		// Yes prettify the response
-		true => {
-			// Pretty the JSON response
-			let res = serde_json::to_string_pretty(&value)?;
-			// Everything processed OK
-			Ok(res)
+	// Check query response for an error
+	let mut response = res?;
+	// Get the number of statements the query contained
+	let num_statements = response.num_statements();
+	// Prepare a single value from the query response
+	let value = if num_statements > 1 {
+		let mut output = Vec::<Value>::with_capacity(num_statements);
+		for index in 0..num_statements {
+			output.push(response.take(index)?);
 		}
-	}
+		Value::from(output)
+	} else {
+		response.take(0)?
+	};
+	// Check if we should prettify
+	Ok(match pretty {
+		// Don't prettify the response
+		false => value.to_string(),
+		// Yes prettify the response
+		true => format!("{value:#}"),
+	})
 }

@@ -8,7 +8,6 @@ use crate::sql::error::IResult;
 use crate::sql::escape::escape_key;
 use crate::sql::fmt::{is_pretty, pretty_indent, Fmt, Pretty};
 use crate::sql::operation::{Op, Operation};
-use crate::sql::serde::is_internal_serialization;
 use crate::sql::thing::Thing;
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
@@ -18,7 +17,6 @@ use nom::character::complete::char;
 use nom::combinator::opt;
 use nom::multi::separated_list0;
 use nom::sequence::delimited;
-use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -26,7 +24,10 @@ use std::fmt::{self, Display, Formatter, Write};
 use std::ops::Deref;
 use std::ops::DerefMut;
 
-#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Deserialize, Hash)]
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Object";
+
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Object")]
 pub struct Object(pub BTreeMap<String, Value>);
 
 impl From<BTreeMap<String, Value>> for Object {
@@ -142,20 +143,22 @@ impl Display for Object {
 		} else {
 			f.write_str("{ ")?;
 		}
-		let indent = pretty_indent();
-		write!(
-			f,
-			"{}",
-			Fmt::pretty_comma_separated(
-				self.0.iter().map(|args| Fmt::new(args, |(k, v), f| write!(
-					f,
-					"{}: {}",
-					escape_key(k),
-					v
-				))),
-			)
-		)?;
-		drop(indent);
+		if !self.is_empty() {
+			let indent = pretty_indent();
+			write!(
+				f,
+				"{}",
+				Fmt::pretty_comma_separated(
+					self.0.iter().map(|args| Fmt::new(args, |(k, v), f| write!(
+						f,
+						"{}: {}",
+						escape_key(k),
+						v
+					))),
+				)
+			)?;
+			drop(indent);
+		}
 		if is_pretty() {
 			f.write_char('}')
 		} else {
@@ -164,28 +167,17 @@ impl Display for Object {
 	}
 }
 
-impl Serialize for Object {
-	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-	where
-		S: serde::Serializer,
-	{
-		if is_internal_serialization() {
-			serializer.serialize_newtype_struct("Object", &self.0)
-		} else {
-			let mut map = serializer.serialize_map(Some(self.len()))?;
-			for (ref k, ref v) in &self.0 {
-				map.serialize_key(k)?;
-				map.serialize_value(v)?;
-			}
-			map.end()
-		}
-	}
-}
-
 pub fn object(i: &str) -> IResult<&str, Object> {
 	let (i, _) = char('{')(i)?;
 	let (i, _) = mightbespace(i)?;
-	let (i, v) = separated_list0(commas, item)(i)?;
+	let (i, v) = separated_list0(commas, |i| {
+		let (i, k) = key(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, _) = char(':')(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, v) = value(i)?;
+		Ok((i, (String::from(k), v)))
+	})(i)?;
 	let (i, _) = mightbespace(i)?;
 	let (i, _) = opt(char(','))(i)?;
 	let (i, _) = mightbespace(i)?;
@@ -193,16 +185,7 @@ pub fn object(i: &str) -> IResult<&str, Object> {
 	Ok((i, Object(v.into_iter().collect())))
 }
 
-fn item(i: &str) -> IResult<&str, (String, Value)> {
-	let (i, k) = key(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char(':')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, v) = value(i)?;
-	Ok((i, (String::from(k), v)))
-}
-
-fn key(i: &str) -> IResult<&str, &str> {
+pub fn key(i: &str) -> IResult<&str, &str> {
 	alt((key_none, key_single, key_double))(i)
 }
 

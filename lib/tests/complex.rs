@@ -102,7 +102,7 @@ fn cyclic_fields() -> Result<(), Error> {
 //		}
 //		//
 //		let tmp = res.next().unwrap()?;
-//		let val = Value::parse("[ [42] ]");
+//		let val = Value::parse("[ { fut: [42] } ]");
 //		assert_eq!(tmp, val);
 //		//
 //		Ok(())

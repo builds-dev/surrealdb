@@ -7,7 +7,8 @@ use crate::sql::part::Part;
 use crate::sql::value::Value;
 
 impl Value {
-	pub async fn decrement(
+	/// Asynchronous method for decrementing a field in a `Value`
+	pub(crate) async fn decrement(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
@@ -15,7 +16,7 @@ impl Value {
 		path: &[Part],
 		val: Value,
 	) -> Result<(), Error> {
-		match self.get(ctx, opt, txn, path).await? {
+		match self.get(ctx, opt, txn, None, path).await? {
 			Value::Number(v) => match val {
 				Value::Number(x) => self.set(ctx, opt, txn, path, Value::from(v - x)).await,
 				_ => Ok(()),
@@ -44,7 +45,7 @@ mod tests {
 	use crate::sql::test::Parse;
 
 	#[tokio::test]
-	async fn dec_none() {
+	async fn decrement_none() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("other");
 		let mut val = Value::parse("{ test: 100 }");
@@ -54,7 +55,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn dec_number() {
+	async fn decrement_number() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test");
 		let mut val = Value::parse("{ test: 100 }");
@@ -64,7 +65,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn dec_array_number() {
+	async fn decrement_array_number() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test[1]");
 		let mut val = Value::parse("{ test: [100, 200, 300] }");
@@ -74,7 +75,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn dec_array_value() {
+	async fn decrement_array_value() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test");
 		let mut val = Value::parse("{ test: [100, 200, 300] }");
@@ -84,7 +85,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn dec_array_array() {
+	async fn decrement_array_array() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test");
 		let mut val = Value::parse("{ test: [100, 200, 300] }");

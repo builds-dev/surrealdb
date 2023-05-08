@@ -11,6 +11,8 @@ use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::str;
 
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Table";
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct Tables(pub Vec<Table>);
 
@@ -39,6 +41,7 @@ pub fn tables(i: &str) -> IResult<&str, Tables> {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Table")]
 pub struct Table(pub String);
 
 impl From<String> for Table {

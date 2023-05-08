@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str;
 
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Expression";
+
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Expression")]
 pub struct Expression {
 	pub l: Value,
 	pub o: Operator,

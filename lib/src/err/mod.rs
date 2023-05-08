@@ -1,6 +1,8 @@
 use crate::sql::idiom::Idiom;
-use msgpack::encode::Error as SerdeError;
+use crate::sql::value::Value;
+use bung::encode::Error as SerdeError;
 use serde::Serialize;
+use std::borrow::Cow;
 use storekey::decode::Error as DecodeError;
 use storekey::encode::Error as EncodeError;
 use thiserror::Error;
@@ -41,10 +43,6 @@ pub enum Error {
 	/// The key being inserted in the transaction already exists
 	#[error("The key being inserted already exists")]
 	TxKeyAlreadyExists,
-
-	/// It's is not possible to convert between the two types
-	#[error("Cannot convert from '{0}' to '{1}'")]
-	TryFromError(String, &'static str),
 
 	/// No namespace has been selected
 	#[error("Specify a namespace to use")]
@@ -171,44 +169,70 @@ pub enum Error {
 	},
 
 	/// The requested namespace does not exist
-	#[error("The namespace does not exist")]
-	NsNotFound,
+	#[error("The namespace '{value}' does not exist")]
+	NsNotFound {
+		value: String,
+	},
 
 	/// The requested namespace token does not exist
-	#[error("The namespace token does not exist")]
-	NtNotFound,
+	#[error("The namespace token '{value}' does not exist")]
+	NtNotFound {
+		value: String,
+	},
 
 	/// The requested namespace login does not exist
-	#[error("The namespace login does not exist")]
-	NlNotFound,
+	#[error("The namespace login '{value}' does not exist")]
+	NlNotFound {
+		value: String,
+	},
 
 	/// The requested database does not exist
-	#[error("The database does not exist")]
-	DbNotFound,
+	#[error("The database '{value}' does not exist")]
+	DbNotFound {
+		value: String,
+	},
 
 	/// The requested database token does not exist
-	#[error("The database token does not exist")]
-	DtNotFound,
+	#[error("The database token '{value}' does not exist")]
+	DtNotFound {
+		value: String,
+	},
 
 	/// The requested database login does not exist
-	#[error("The database login does not exist")]
-	DlNotFound,
+	#[error("The database login '{value}' does not exist")]
+	DlNotFound {
+		value: String,
+	},
+
+	/// The requested function does not exist
+	#[error("The function 'fn::{value}' does not exist")]
+	FcNotFound {
+		value: String,
+	},
 
 	/// The requested scope does not exist
-	#[error("The scope does not exist")]
-	ScNotFound,
+	#[error("The scope '{value}' does not exist")]
+	ScNotFound {
+		value: String,
+	},
 
 	/// The requested scope token does not exist
-	#[error("The scope token does not exist")]
-	StNotFound,
+	#[error("The scope token '{value}' does not exist")]
+	StNotFound {
+		value: String,
+	},
 
 	/// The requested param does not exist
-	#[error("The param does not exist")]
-	PaNotFound,
+	#[error("The param '${value}' does not exist")]
+	PaNotFound {
+		value: String,
+	},
 
 	/// The requested table does not exist
-	#[error("The table does not exist")]
-	TbNotFound,
+	#[error("The table '{value}' does not exist")]
+	TbNotFound {
+		value: String,
+	},
 
 	/// Unable to perform the realtime query
 	#[error("Unable to perform the realtime query")]
@@ -286,6 +310,15 @@ pub enum Error {
 		value: String,
 	},
 
+	/// The specified field did not conform to the field type check
+	#[error("Found {value} for field `{field}`, with record `{thing}`, but expected a {check}")]
+	FieldCheck {
+		thing: String,
+		value: String,
+		field: Idiom,
+		check: String,
+	},
+
 	/// The specified field did not conform to the field ASSERT clause
 	#[error("Found {value} for field `{field}`, with record `{thing}`, but field must conform to: {check}")]
 	FieldValue {
@@ -300,6 +333,37 @@ pub enum Error {
 	IdInvalid {
 		value: String,
 	},
+
+	/// The requested function does not exist
+	#[error("Expected a {into} but failed to convert {from} into a {into}")]
+	ConvertTo {
+		from: Value,
+		into: Cow<'static, str>,
+	},
+
+	/// The requested function does not exist
+	#[error("Cannot perform addition with '{0}' and '{1}'")]
+	TryAdd(String, String),
+
+	/// The requested function does not exist
+	#[error("Cannot perform subtraction with '{0}' and '{1}'")]
+	TrySub(String, String),
+
+	/// The requested function does not exist
+	#[error("Cannot perform multiplication with '{0}' and '{1}'")]
+	TryMul(String, String),
+
+	/// The requested function does not exist
+	#[error("Cannot perform division with '{0}' and '{1}'")]
+	TryDiv(String, String),
+
+	/// The requested function does not exist
+	#[error("Cannot raise the value '{0}' with '{1}'")]
+	TryPow(String, String),
+
+	/// It's is not possible to convert between the two types
+	#[error("Cannot convert from '{0}' to '{1}'")]
+	TryFrom(String, &'static str),
 
 	/// There was an error processing a remote HTTP request
 	#[error("There was an error processing a remote HTTP request")]
