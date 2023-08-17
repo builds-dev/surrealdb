@@ -101,27 +101,35 @@
 #![cfg_attr(test, deny(warnings))]
 
 #[macro_use]
-extern crate log;
+extern crate tracing;
 
 #[macro_use]
 mod mac;
 
 mod api;
-mod cnf;
+mod cf;
 mod ctx;
 mod doc;
 mod exe;
 mod fnc;
-mod key;
+mod vs;
 
 pub mod sql;
 
+#[doc(hidden)]
+pub mod cnf;
 #[doc(hidden)]
 pub mod dbs;
 #[doc(hidden)]
 pub mod env;
 #[doc(hidden)]
 pub mod err;
+#[doc(hidden)]
+pub mod iam;
+#[doc(hidden)]
+pub mod idx;
+#[doc(hidden)]
+pub mod key;
 #[doc(hidden)]
 pub mod kvs;
 
@@ -157,7 +165,7 @@ pub mod error {
 }
 
 /// An error originating from the SurrealDB client library
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, thiserror::Error, serde::Serialize)]
 pub enum Error {
 	/// An error with an embedded storage engine
 	#[error("{0}")]

@@ -1,12 +1,10 @@
 use crate::ctx::Context;
-use crate::dbs::Operable;
-use crate::dbs::Options;
 use crate::dbs::Statement;
-use crate::dbs::Transaction;
 use crate::dbs::Workable;
+use crate::dbs::{Operable, Transaction};
+use crate::dbs::{Options, Processed};
 use crate::doc::Document;
 use crate::err::Error;
-use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use channel::Sender;
 
@@ -18,17 +16,16 @@ impl<'a> Document<'a> {
 		txn: &Transaction,
 		stm: &Statement<'_>,
 		chn: Sender<Result<Value, Error>>,
-		thg: Option<Thing>,
-		val: Operable,
+		pro: Processed,
 	) -> Result<(), Error> {
 		// Setup a new workable
-		let ins = match val {
+		let ins = match pro.val {
 			Operable::Value(v) => (v, Workable::Normal),
 			Operable::Mergeable(v, o) => (v, Workable::Insert(o)),
 			Operable::Relatable(f, v, w) => (v, Workable::Relate(f, w)),
 		};
 		// Setup a new document
-		let mut doc = Document::new(thg, &ins.0, ins.1);
+		let mut doc = Document::new(pro.ir, pro.rid.as_ref(), pro.doc_id, &ins.0, ins.1);
 		// Process the statement
 		let res = match stm {
 			Statement::Select(_) => doc.select(ctx, opt, txn, stm).await,

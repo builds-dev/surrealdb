@@ -14,21 +14,53 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
 
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Checkout sources
         uses: actions/checkout@v3
+
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install dependencies
         run: |
           sudo apt-get -y update
-          sudo apt-get -y install protobuf-compiler libprotobuf-dev
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run cargo test
+      - name: Free up some disk space
         run: |
-          (&>/dev/null cargo run --no-default-features -F storage-mem -- start --log trace --user root --pass root memory &)
-          cargo test --workspace --features protocol-ws,protocol-http,kv-rocksdb
+          (set -x; df -h)
+          # Free up some disk space by removing unused files
+          (set -x; sudo rm -rf /imagegeneration || true)
+          (set -x; sudo rm -rf /opt/az || true)
+          (set -x; sudo rm -rf /opt/hostedtoolcache || true)
+          (set -x; sudo rm -rf /opt/google || true)
+          (set -x; sudo rm -rf /opt/pipx || true)
+          (set -x; df -h)
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install cargo-make
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: --debug cargo-make
+
+      - name: Test workspace + coverage
+        uses: actions-rs/cargo@v1
+        with:
+          command: make
+          args: ci-workspace-coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v3
+        with:
+          name: code-coverage-report
+          path: target/llvm-cov/html/
+          retention-days: 5
 
   lint:
     name: Lint
@@ -41,7 +73,6 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get -y update
-          sudo apt-get -y install protobuf-compiler libprotobuf-dev
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -49,17 +80,35 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
 
-      - name: Run cargo check
-        run: cargo check --workspace
+      - name: Install cargo-make
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: --debug cargo-make
 
-      - name: Run cargo fmt
-        run: cargo fmt --all -- --check
+      - name: Check workspace
+        uses: actions-rs/cargo@v1
+        with:
+          command: make
+          args: ci-check
 
-      - name: Run cargo clippy
-        run: cargo clippy -- -W warnings
+      - name: Check format
+        uses: actions-rs/cargo@v1
+        with:
+          command: make
+          args: ci-format
 
-      - name: Run WebAssembly check
-        run: cargo check --features kv-mem,kv-indxdb,protocol-ws,protocol-http --target wasm32-unknown-unknown --package surrealdb
+      - name: Check wasm
+        uses: actions-rs/cargo@v1
+        with:
+          command: make
+          args: ci-check-wasm
+
+      - name: Check clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: make
+          args: ci-clippy
 
   build:
     name: Build ${{ matrix.arch }}
@@ -102,8 +151,6 @@ jobs:
         if: contains(matrix.arch, 'windows') && endsWith(matrix.arch, '-msvc')
         run: |
           vcpkg integrate install
-          vcpkg install openssl:x64-windows-static
-          choco install protoc
 
       - name: Install dependencies
         if: contains(matrix.arch, 'apple') && endsWith(matrix.arch, '-darwin')
@@ -116,7 +163,6 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install musl-tools qemu-user libc6-dev-arm64-cross
           sudo apt-get -y install g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
-          sudo apt-get -y install protobuf-compiler libprotobuf-dev
 
       - name: Install FoundationDB
         if: contains(matrix.arch, 'linux') && startsWith(matrix.arch, 'x86_64')
@@ -242,11 +288,10 @@ jobs:
   #         done
 
   docker:
-    name: Docker
+    name: Build and publish Docker image
     needs: [build]
     runs-on: ubuntu-20.04
     steps:
-
       - name: Checkout sources
         uses: actions/checkout@v3
 
@@ -284,13 +329,43 @@ jobs:
         shell: bash
         run: |
           VERSION=nightly
-          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: Build and Push
-        uses: docker/build-push-action@v3
+      - name: Build the Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          load: true
+          tags: surrealdb/surrealdb:${{ env.VERSION }}
+
+      # Start the docker image as server and wait until it is ready
+      - name: Test the Docker image
+        run: |
+          docker run --net=host --rm surrealdb/surrealdb:${{ env.VERSION }} start 2>&1 >surreal.log &
+
+          retries=5
+          until docker run --net=host --rm surrealdb/surrealdb:${{ env.VERSION }} is-ready; do
+            retries=$((retries-1))
+            if [[ $retries -eq 0 ]]; then
+              echo "###"
+              echo "### The container is not ready after 5 seconds!"
+              echo "###"
+              cat surreal.log
+              echo "###"
+              echo "### ERROR: The docker image is not valid. Aborting."
+              echo "###"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # This second build reuses the cache from the build above
+      - name: Push the Docker image
+        uses: docker/build-push-action@v4
         with:
           context: .
           push: true
           # platforms: linux/amd64,linux/arm64
           platforms: linux/amd64
-          tags: buildsdev/surrealdb:nightly
+          tags: buildsdev/surrealdb:${{ env.VERSION }}
+

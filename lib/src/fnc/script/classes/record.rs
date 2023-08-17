@@ -1,56 +1,52 @@
-#[js::bind(object, public)]
-#[quickjs(bare)]
-#[allow(non_snake_case)]
-#[allow(unused_variables)]
-#[allow(clippy::module_inception)]
-pub mod record {
+use crate::sql::thing;
+use crate::sql::value::Value;
+use js::class::Trace;
 
-	use crate::sql::thing;
-	use crate::sql::value::Value;
-	use js::Rest;
+#[derive(Clone, Trace)]
+#[js::class]
+pub struct Record {
+	#[qjs(skip_trace)]
+	pub(crate) value: thing::Thing,
+}
 
-	#[derive(Clone)]
-	#[quickjs(class)]
-	#[quickjs(cloneable)]
-	pub struct Record {
-		#[quickjs(hide)]
-		pub(crate) value: thing::Thing,
+#[js::methods]
+impl Record {
+	#[qjs(constructor)]
+	pub fn new(tb: String, id: Value) -> Self {
+		Self {
+			value: thing::Thing {
+				tb,
+				id: match id {
+					Value::Array(v) => v.into(),
+					Value::Object(v) => v.into(),
+					Value::Number(v) => v.into(),
+					v => v.as_string().into(),
+				},
+			},
+		}
 	}
 
-	impl Record {
-		#[quickjs(constructor)]
-		pub fn new(tb: String, id: Value, args: Rest<Value>) -> Self {
-			Self {
-				value: thing::Thing {
-					tb,
-					id: match id {
-						Value::Array(v) => v.into(),
-						Value::Object(v) => v.into(),
-						Value::Number(v) => v.into(),
-						v => v.as_string().into(),
-					},
-				},
-			}
-		}
-		#[quickjs(get)]
-		pub fn tb(&self) -> &str {
-			&self.value.tb
-		}
-		#[quickjs(get)]
-		pub fn id(&self) -> String {
-			self.value.id.to_raw()
-		}
-		// Compare two Record instances
-		pub fn is(a: &Record, b: &Record, args: Rest<Value>) -> bool {
-			a.value == b.value
-		}
-		/// Convert the object to a string
-		pub fn toString(&self, args: Rest<Value>) -> String {
-			self.value.to_raw()
-		}
-		/// Convert the object to JSON
-		pub fn toJSON(&self, args: Rest<Value>) -> String {
-			self.value.to_raw()
-		}
+	#[qjs(get)]
+	pub fn tb(&self) -> String {
+		self.value.tb.clone()
+	}
+
+	#[qjs(get)]
+	pub fn id(&self) -> String {
+		self.value.id.to_raw()
+	}
+	// Compare two Record instances
+	pub fn is(a: &Record, b: &Record) -> bool {
+		a.value == b.value
+	}
+	/// Convert the object to a string
+	#[qjs(rename = "toString")]
+	pub fn js_to_string(&self) -> String {
+		self.value.to_raw()
+	}
+	/// Convert the object to JSON
+	#[qjs(rename = "toJSON")]
+	pub fn to_json(&self) -> String {
+		self.value.to_raw()
 	}
 }

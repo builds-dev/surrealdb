@@ -2,8 +2,23 @@ use crate::err::Error;
 use crate::fnc::util::string;
 use crate::sql::value::Value;
 
+/// Returns `true` if a string of this length is too much to allocate.
+fn limit(name: &str, n: usize) -> Result<(), Error> {
+	const LIMIT: usize = 2usize.pow(20);
+	if n > LIMIT {
+		Err(Error::InvalidArguments {
+			name: name.to_owned(),
+			message: format!("Output must not exceed {LIMIT} bytes."),
+		})
+	} else {
+		Ok(())
+	}
+}
+
 pub fn concat(args: Vec<Value>) -> Result<Value, Error> {
-	Ok(args.into_iter().map(|x| x.as_string()).collect::<Vec<_>>().concat().into())
+	let strings = args.into_iter().map(Value::as_string).collect::<Vec<_>>();
+	limit("string::concat", strings.iter().map(String::len).sum::<usize>())?;
+	Ok(strings.concat().into())
 }
 
 pub fn contains((val, check): (String, String)) -> Result<Value, Error> {
@@ -20,10 +35,19 @@ pub fn join(args: Vec<Value>) -> Result<Value, Error> {
 		name: String::from("string::join"),
 		message: String::from("Expected at least one argument"),
 	})?;
+
+	let strings = args.collect::<Vec<_>>();
+	limit(
+		"string::join",
+		strings
+			.len()
+			.saturating_mul(chr.len())
+			.saturating_add(strings.iter().map(String::len).sum::<usize>()),
+	)?;
+
 	// FIXME: Use intersperse to avoid intermediate allocation once stable
 	// https://github.com/rust-lang/rust/issues/79524
-	let val = args.collect::<Vec<_>>().join(&chr);
-	Ok(val.into())
+	Ok(strings.join(&chr).into())
 }
 
 pub fn len((string,): (String,)) -> Result<Value, Error> {
@@ -36,18 +60,18 @@ pub fn lowercase((string,): (String,)) -> Result<Value, Error> {
 }
 
 pub fn repeat((val, num): (String, usize)) -> Result<Value, Error> {
-	const LIMIT: usize = 2usize.pow(20);
-	if val.len().saturating_mul(num) > LIMIT {
-		Err(Error::InvalidArguments {
-			name: String::from("string::repeat"),
-			message: format!("Output must not exceed {LIMIT} bytes."),
-		})
-	} else {
-		Ok(val.repeat(num).into())
-	}
+	limit("string::repeat", val.len().saturating_mul(num))?;
+	Ok(val.repeat(num).into())
 }
 
 pub fn replace((val, old, new): (String, String, String)) -> Result<Value, Error> {
+	if new.len() > old.len() {
+		let increase = new.len() - old.len();
+		limit(
+			"string::replace",
+			val.len().saturating_add(val.matches(&old).count().saturating_mul(increase)),
+		)?;
+	}
 	Ok(val.replace(&old, &new).into())
 }
 
@@ -86,7 +110,7 @@ pub fn slice((val, beg, lim): (String, Option<isize>, Option<isize>)) -> Result<
 }
 
 pub fn slug((string,): (String,)) -> Result<Value, Error> {
-	Ok(string::slug(string).into())
+	Ok(string::slug::slug(string).into())
 }
 
 pub fn split((val, chr): (String, String)) -> Result<Value, Error> {
@@ -107,6 +131,45 @@ pub fn uppercase((string,): (String,)) -> Result<Value, Error> {
 
 pub fn words((string,): (String,)) -> Result<Value, Error> {
 	Ok(string.split_whitespace().collect::<Vec<&str>>().into())
+}
+
+pub mod distance {
+
+	use crate::err::Error;
+	use crate::sql::Value;
+
+	pub fn hamming((_, _): (String, String)) -> Result<Value, Error> {
+		Err(Error::FeatureNotYetImplemented {
+			feature: "string::distance::hamming() function",
+		})
+	}
+
+	pub fn levenshtein((_, _): (String, String)) -> Result<Value, Error> {
+		Err(Error::FeatureNotYetImplemented {
+			feature: "string::distance::levenshtein() function",
+		})
+	}
+}
+
+pub mod similarity {
+
+	use crate::err::Error;
+	use crate::fnc::util::string::fuzzy::Fuzzy;
+	use crate::sql::Value;
+
+	pub fn fuzzy((a, b): (String, String)) -> Result<Value, Error> {
+		Ok(a.as_str().fuzzy_score(b.as_str()).into())
+	}
+
+	pub fn jaro((_, _): (String, String)) -> Result<Value, Error> {
+		Err(Error::FeatureNotYetImplemented {
+			feature: "string::similarity::jaro() function",
+		})
+	}
+
+	pub fn smithwaterman((a, b): (String, String)) -> Result<Value, Error> {
+		Ok(a.as_str().fuzzy_score(b.as_str()).into())
+	}
 }
 
 #[cfg(test)]

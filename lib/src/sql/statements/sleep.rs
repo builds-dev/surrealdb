@@ -1,12 +1,12 @@
 use crate::ctx::Context;
-use crate::dbs::Level;
 use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::iam::{Action, ResourceKind};
 use crate::sql::comment::shouldbespace;
 use crate::sql::duration::duration;
 use crate::sql::error::IResult;
-use crate::sql::{Duration, Value};
+use crate::sql::{Base, Duration, Value};
 use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use serde::{Deserialize, Serialize};
@@ -18,17 +18,15 @@ pub struct SleepStatement {
 }
 
 impl SleepStatement {
+	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
 		ctx: &Context<'_>,
 		opt: &Options,
-		_txn: &Transaction,
-		_doc: Option<&Value>,
+		_doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		// No need for NS/DB
-		opt.needs(Level::Kv)?;
 		// Allowed to run?
-		opt.check(Level::Kv)?;
+		opt.is_allowed(Action::Edit, ResourceKind::Table, &Base::Root)?;
 		// Calculate the sleep duration
 		let dur = match (ctx.timeout(), self.duration.0) {
 			(Some(t), d) if t < d => t,
@@ -64,10 +62,10 @@ pub fn sleep(i: &str) -> IResult<&str, SleepStatement> {
 
 #[cfg(test)]
 mod tests {
-
 	use super::*;
 	use crate::dbs::test::mock;
-	use crate::dbs::Auth;
+	use crate::iam::{Auth, Role};
+	use std::sync::Arc;
 	use std::time::SystemTime;
 
 	#[test]
@@ -92,10 +90,10 @@ mod tests {
 	async fn test_sleep_compute() {
 		let sql = "SLEEP 500ms";
 		let time = SystemTime::now();
-		let opt = Options::new(Auth::Kv);
-		let (ctx, _, txn) = mock().await;
+		let opt = Options::default().with_auth(Arc::new(Auth::for_root(Role::Owner)));
+		let (ctx, _, _) = mock().await;
 		let (_, stm) = sleep(sql).unwrap();
-		let value = stm.compute(&ctx, &opt, &txn, None).await.unwrap();
+		let value = stm.compute(&ctx, &opt, None).await.unwrap();
 		assert!(time.elapsed().unwrap() >= time::Duration::microseconds(500));
 		assert_eq!(value, Value::None);
 	}

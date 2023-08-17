@@ -13,8 +13,8 @@ async fn future_function_simple() -> Result<(), Error> {
 		UPDATE person:test SET birthday = <datetime> '2001-06-22';
 	";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
-	let res = &mut dbs.execute(&sql, &ses, None, false).await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 3);
 	//
 	let tmp = res.remove(0).result?;
@@ -45,8 +45,8 @@ async fn future_function_arguments() -> Result<(), Error> {
 		;
 	";
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
-	let res = &mut dbs.execute(&sql, &ses, None, false).await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 1);
 	//
 	let tmp = res.remove(0).result?;
@@ -92,8 +92,8 @@ async fn concurrency() -> Result<(), Error> {
 	async fn test_limit(limit: usize) -> Result<bool, Error> {
 		let sql = query(limit, MILLIS);
 		let dbs = Datastore::new("memory").await?;
-		let ses = Session::for_kv().with_ns("test").with_db("test");
-		let res = dbs.execute(&sql, &ses, None, false).await;
+		let ses = Session::owner().with_ns("test").with_db("test");
+		let res = dbs.execute(&sql, &ses, None).await;
 
 		if matches!(res, Err(Error::QueryTimedout)) {
 			Ok(false)

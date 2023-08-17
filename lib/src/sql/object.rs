@@ -1,13 +1,13 @@
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
+use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::sql::comment::mightbespace;
 use crate::sql::common::{commas, val_char};
 use crate::sql::error::IResult;
 use crate::sql::escape::escape_key;
 use crate::sql::fmt::{is_pretty, pretty_indent, Fmt, Pretty};
-use crate::sql::operation::{Op, Operation};
+use crate::sql::operation::Operation;
 use crate::sql::thing::Thing;
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
@@ -26,13 +26,20 @@ use std::ops::DerefMut;
 
 pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Object";
 
+/// Invariant: Keys never contain NUL bytes.
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
 #[serde(rename = "$surrealdb::private::sql::Object")]
-pub struct Object(pub BTreeMap<String, Value>);
+pub struct Object(#[serde(with = "no_nul_bytes_in_keys")] pub BTreeMap<String, Value>);
 
 impl From<BTreeMap<String, Value>> for Object {
 	fn from(v: BTreeMap<String, Value>) -> Self {
 		Self(v)
+	}
+}
+
+impl From<HashMap<&str, Value>> for Object {
+	fn from(v: HashMap<&str, Value>) -> Self {
+		Self(v.into_iter().map(|(key, val)| (key.to_string(), val)).collect())
 	}
 }
 
@@ -50,16 +57,61 @@ impl From<Option<Self>> for Object {
 
 impl From<Operation> for Object {
 	fn from(v: Operation) -> Self {
-		Self(map! {
-			String::from("op") => match v.op {
-				Op::None => Value::from("none"),
-				Op::Add => Value::from("add"),
-				Op::Remove => Value::from("remove"),
-				Op::Replace => Value::from("replace"),
-				Op::Change => Value::from("change"),
+		Self(match v {
+			Operation::Add {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("add"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
 			},
-			String::from("path") => v.path.to_path().into(),
-			String::from("value") => v.value,
+			Operation::Remove {
+				path,
+			} => map! {
+				String::from("op") => Value::from("remove"),
+				String::from("path") => path.to_path().into()
+			},
+			Operation::Replace {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("replace"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
+			Operation::Change {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("change"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
+			Operation::Copy {
+				path,
+				from,
+			} => map! {
+				String::from("op") => Value::from("copy"),
+				String::from("path") => path.to_path().into(),
+				String::from("from") => from.to_path().into()
+			},
+			Operation::Move {
+				path,
+				from,
+			} => map! {
+				String::from("op") => Value::from("move"),
+				String::from("path") => path.to_path().into(),
+				String::from("from") => from.to_path().into()
+			},
+			Operation::Test {
+				path,
+				value,
+			} => map! {
+				String::from("op") => Value::from("test"),
+				String::from("path") => path.to_path().into(),
+				String::from("value") => value
+			},
 		})
 	}
 }
@@ -96,15 +148,59 @@ impl Object {
 	/// Convert this object to a diff-match-patch operation
 	pub fn to_operation(&self) -> Result<Operation, Error> {
 		match self.get("op") {
-			Some(o) => match self.get("path") {
-				Some(p) => Ok(Operation {
-					op: o.into(),
-					path: p.jsonpath(),
-					value: match self.get("value") {
-						Some(v) => v.clone(),
-						None => Value::Null,
-					},
-				}),
+			Some(op_val) => match self.get("path") {
+				Some(path_val) => {
+					let path = path_val.jsonpath();
+
+					let from =
+						self.get("from").map(|value| value.jsonpath()).ok_or(Error::InvalidPatch {
+							message: String::from("'from' key missing"),
+						});
+
+					let value = self.get("value").cloned().ok_or(Error::InvalidPatch {
+						message: String::from("'value' key missing"),
+					});
+
+					match op_val.clone().as_string().as_str() {
+						// Add operation
+						"add" => Ok(Operation::Add {
+							path,
+							value: value?,
+						}),
+						// Remove operation
+						"remove" => Ok(Operation::Remove {
+							path,
+						}),
+						// Replace operation
+						"replace" => Ok(Operation::Replace {
+							path,
+							value: value?,
+						}),
+						// Change operation
+						"change" => Ok(Operation::Change {
+							path,
+							value: value?,
+						}),
+						// Copy operation
+						"copy" => Ok(Operation::Copy {
+							path,
+							from: from?,
+						}),
+						// Move operation
+						"move" => Ok(Operation::Move {
+							path,
+							from: from?,
+						}),
+						// Test operation
+						"test" => Ok(Operation::Test {
+							path,
+							value: value?,
+						}),
+						unknown_op => Err(Error::InvalidPatch {
+							message: format!("unknown op '{unknown_op}'"),
+						}),
+					}
+				}
 				_ => Err(Error::InvalidPatch {
 					message: String::from("'path' key missing"),
 				}),
@@ -117,12 +213,13 @@ impl Object {
 }
 
 impl Object {
+	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		doc: Option<&Value>,
+		doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
 		let mut x = BTreeMap::new();
 		for (k, v) in self.iter() {
@@ -167,6 +264,60 @@ impl Display for Object {
 	}
 }
 
+mod no_nul_bytes_in_keys {
+	use serde::{
+		de::{self, Visitor},
+		ser::SerializeMap,
+		Deserializer, Serializer,
+	};
+	use std::{collections::BTreeMap, fmt};
+
+	use crate::sql::Value;
+
+	pub(crate) fn serialize<S>(
+		m: &BTreeMap<String, Value>,
+		serializer: S,
+	) -> Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		let mut s = serializer.serialize_map(Some(m.len()))?;
+		for (k, v) in m {
+			debug_assert!(!k.contains('\0'));
+			s.serialize_entry(k, v)?;
+		}
+		s.end()
+	}
+
+	pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<String, Value>, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		struct NoNulBytesInKeysVisitor;
+
+		impl<'de> Visitor<'de> for NoNulBytesInKeysVisitor {
+			type Value = BTreeMap<String, Value>;
+
+			fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+				formatter.write_str("a map without any NUL bytes in its keys")
+			}
+
+			fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+			where
+				A: de::MapAccess<'de>,
+			{
+				let mut ret = BTreeMap::new();
+				while let Some((k, v)) = map.next_entry()? {
+					ret.insert(k, v);
+				}
+				Ok(ret)
+			}
+		}
+
+		deserializer.deserialize_map(NoNulBytesInKeysVisitor)
+	}
+}
+
 pub fn object(i: &str) -> IResult<&str, Object> {
 	let (i, _) = char('{')(i)?;
 	let (i, _) = mightbespace(i)?;
@@ -194,11 +345,11 @@ fn key_none(i: &str) -> IResult<&str, &str> {
 }
 
 fn key_single(i: &str) -> IResult<&str, &str> {
-	delimited(char('\''), is_not("\'"), char('\''))(i)
+	delimited(char('\''), is_not("\'\0"), char('\''))(i)
 }
 
 fn key_double(i: &str) -> IResult<&str, &str> {
-	delimited(char('\"'), is_not("\""), char('\"'))(i)
+	delimited(char('\"'), is_not("\"\0"), char('\"'))(i)
 }
 
 #[cfg(test)]

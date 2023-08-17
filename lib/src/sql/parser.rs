@@ -1,7 +1,9 @@
 use crate::err::Error;
-use crate::sql::error::Error::{Field, Group, Order, Parser, Split};
+use crate::iam::Error as IamError;
+use crate::sql::error::Error::{Field, Group, Order, Parser, Role, Split};
 use crate::sql::error::IResult;
 use crate::sql::query::{query, Query};
+use crate::sql::subquery::{subquery, Subquery};
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use nom::Err;
@@ -12,6 +14,12 @@ use tracing::instrument;
 #[instrument(name = "parser", skip_all, fields(length = input.len()))]
 pub fn parse(input: &str) -> Result<Query, Error> {
 	parse_impl(input, query)
+}
+
+/// Parses a SurrealQL Subquery [`Subquery`]
+#[instrument(name = "parser", skip_all, fields(length = input.len()))]
+pub fn sub_query(input: &str) -> Result<Subquery, Error> {
+	parse_impl(input, subquery)
 }
 
 /// Parses a SurrealQL [`Thing`]
@@ -29,7 +37,7 @@ pub fn value(input: &str) -> Result<Value, Error> {
 /// Parses JSON into an inert SurrealQL [`Value`]
 #[instrument(name = "parser", skip_all, fields(length = input.len()))]
 pub fn json(input: &str) -> Result<Value, Error> {
-	parse_impl(input, super::value::json)
+	parse_impl(input.trim(), super::value::json)
 }
 
 fn parse_impl<O>(input: &str, parser: impl Fn(&str) -> IResult<&str, O>) -> Result<O, Error> {
@@ -76,6 +84,8 @@ fn parse_impl<O>(input: &str, parser: impl Fn(&str) -> IResult<&str, O>) -> Resu
 					line: locate(input, e).1,
 					field: f,
 				},
+				// There was an error parsing the ROLE
+				Role(_, role) => Error::IamError(IamError::InvalidRole(role)),
 			}),
 			_ => unreachable!(),
 		},

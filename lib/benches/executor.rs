@@ -1,4 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use pprof::criterion::{Output, PProfProfiler};
 use surrealdb::{dbs::Session, kvs::Datastore};
 
 macro_rules! query {
@@ -9,17 +10,17 @@ macro_rules! query {
 		$c.bench_function(stringify!($name), |b| {
 			let (dbs, ses) = futures::executor::block_on(async {
 				let dbs = Datastore::new("memory").await.unwrap();
-				let ses = Session::for_kv().with_ns("test").with_db("test");
+				let ses = Session::owner().with_ns("test").with_db("test");
 				let setup = $setup;
 				if !setup.is_empty() {
-					dbs.execute(setup, &ses, None, false).await.unwrap();
+					dbs.execute(setup, &ses, None).await.unwrap();
 				}
 				(dbs, ses)
 			});
 
 			b.iter(|| {
 				futures::executor::block_on(async {
-					black_box(dbs.execute(black_box($query), &ses, None, false).await).unwrap();
+					black_box(dbs.execute(black_box($query), &ses, None).await).unwrap();
 				});
 			})
 		});
@@ -45,8 +46,20 @@ fn bench_executor(c: &mut Criterion) {
 		"CREATE person:one SET friend = person:two; CREATE person:two SET age = 30;",
 		"SELECT * FROM person:one.friend.age;"
 	);
+	#[cfg(feature = "scripting")]
+	query!(c, javascript_simple, "RETURN function() { return 1 + 1; };");
+	#[cfg(feature = "scripting")]
+	query!(
+		c,
+		javascript_function,
+		"RETURN function() { return surrealdb::functions::count([1, 2, 3]); };"
+	);
 	c.finish();
 }
 
-criterion_group!(benches, bench_executor);
+criterion_group!(
+	name = benches;
+	config = Criterion::default().with_profiler(PProfProfiler::new(1000, Output::Flamegraph(None)));
+	targets = bench_executor
+);
 criterion_main!(benches);

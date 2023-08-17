@@ -9,12 +9,12 @@ use crate::api::opt::Endpoint;
 #[cfg(any(feature = "native-tls", feature = "rustls"))]
 use crate::api::opt::Tls;
 use crate::api::ExtraFeatures;
+use crate::api::OnceLockExt;
 use crate::api::Result;
 use crate::api::Surreal;
 use flume::Receiver;
 use futures::StreamExt;
 use indexmap::IndexMap;
-use once_cell::sync::OnceCell;
 use reqwest::header::HeaderMap;
 use reqwest::ClientBuilder;
 use std::collections::HashSet;
@@ -23,6 +23,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use url::Url;
 
 impl crate::api::Connection for Client {}
@@ -68,11 +69,10 @@ impl Connection for Client {
 			router(base_url, client, route_rx);
 
 			let mut features = HashSet::new();
-			features.insert(ExtraFeatures::Auth);
 			features.insert(ExtraFeatures::Backup);
 
 			Ok(Surreal {
-				router: OnceCell::with_value(Arc::new(Router {
+				router: Arc::new(OnceLock::with_value(Router {
 					features,
 					conn: PhantomData,
 					sender: route_tx,
@@ -107,7 +107,7 @@ pub(crate) fn router(base_url: Url, client: reqwest::Client, route_rx: Receiver<
 		let mut stream = route_rx.into_stream();
 
 		while let Some(Some(route)) = stream.next().await {
-			match super::router(
+			let result = super::router(
 				route.request,
 				&base_url,
 				&client,
@@ -115,15 +115,8 @@ pub(crate) fn router(base_url: Url, client: reqwest::Client, route_rx: Receiver<
 				&mut vars,
 				&mut auth,
 			)
-			.await
-			{
-				Ok(value) => {
-					let _ = route.response.into_send_async(Ok(value)).await;
-				}
-				Err(error) => {
-					let _ = route.response.into_send_async(Err(error)).await;
-				}
-			}
+			.await;
+			let _ = route.response.into_send_async(result).await;
 		}
 	});
 }

@@ -1,3 +1,9 @@
+//! This module defines the lifecycle of everything that happens in a document.
+//! A document is a row that has the following:
+//! - `Thing`: name of the table and ID of the record
+//! - `current`: value after the transaction
+//! - `initial`: value before the transaction
+//! - `id`: traditionally an integer but can be an object or collection such as an array
 pub(crate) use self::document::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,6 +20,7 @@ mod update; // Processes a UPDATE statement for this document
 
 mod allow; // Checks whether the query can access this document
 mod alter; // Modifies and updates the fields in this document
+mod changefeeds; // Processes any change feeds relevant for this document
 mod check; // Checks whether the WHERE clauses matches this document
 mod clean; // Ensures records adhere to the table schema
 mod edges; // Attempts to store the edge data for this document

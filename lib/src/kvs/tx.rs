@@ -2,18 +2,28 @@ use super::kv::Add;
 use super::kv::Convert;
 use super::Key;
 use super::Val;
+use crate::cf;
+use crate::dbs::node::ClusterMembership;
+use crate::dbs::node::Timestamp;
 use crate::err::Error;
-use crate::key::thing;
 use crate::kvs::cache::Cache;
 use crate::kvs::cache::Entry;
+use crate::kvs::Check;
+use crate::kvs::LqValue;
 use crate::sql;
 use crate::sql::paths::EDGE;
 use crate::sql::paths::IN;
 use crate::sql::paths::OUT;
+use crate::sql::statements::DefineUserStatement;
 use crate::sql::thing::Thing;
+use crate::sql::Strand;
 use crate::sql::Value;
+use crate::vs::Oracle;
+use crate::vs::Versionstamp;
 use channel::Sender;
+use futures::lock::Mutex;
 use sql::permission::Permissions;
+use sql::statements::DefineAnalyzerStatement;
 use sql::statements::DefineDatabaseStatement;
 use sql::statements::DefineEventStatement;
 use sql::statements::DefineFieldStatement;
@@ -26,19 +36,21 @@ use sql::statements::DefineScopeStatement;
 use sql::statements::DefineTableStatement;
 use sql::statements::DefineTokenStatement;
 use sql::statements::LiveStatement;
+use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
-
-#[cfg(debug_assertions)]
-const LOG: &str = "surrealdb::txn";
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 /// A set of undoable updates and requests against a dataset.
 #[allow(dead_code)]
 pub struct Transaction {
 	pub(super) inner: Inner,
 	pub(super) cache: Cache,
+	pub(super) cf: cf::Writer,
+	pub(super) vso: Arc<Mutex<Oracle>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -47,12 +59,14 @@ pub(super) enum Inner {
 	Mem(super::mem::Transaction),
 	#[cfg(feature = "kv-rocksdb")]
 	RocksDB(super::rocksdb::Transaction),
+	#[cfg(feature = "kv-speedb")]
+	SpeeDB(super::speedb::Transaction),
 	#[cfg(feature = "kv-indxdb")]
 	IndxDB(super::indxdb::Transaction),
 	#[cfg(feature = "kv-tikv")]
 	TiKV(super::tikv::Transaction),
 	#[cfg(feature = "kv-fdb")]
-	FDB(super::fdb::Transaction),
+	FoundationDB(super::fdb::Transaction),
 }
 
 impl fmt::Display for Transaction {
@@ -63,12 +77,14 @@ impl fmt::Display for Transaction {
 			Inner::Mem(_) => write!(f, "memory"),
 			#[cfg(feature = "kv-rocksdb")]
 			Inner::RocksDB(_) => write!(f, "rocksdb"),
+			#[cfg(feature = "kv-speedb")]
+			Inner::SpeeDB(_) => write!(f, "speedb"),
 			#[cfg(feature = "kv-indxdb")]
-			Inner::IndxDB(_) => write!(f, "indexdb"),
+			Inner::IndxDB(_) => write!(f, "indxdb"),
 			#[cfg(feature = "kv-tikv")]
 			Inner::TiKV(_) => write!(f, "tikv"),
 			#[cfg(feature = "kv-fdb")]
-			Inner::FDB(_) => write!(f, "fdb"),
+			Inner::FoundationDB(_) => write!(f, "fdb"),
 			#[allow(unreachable_patterns)]
 			_ => unreachable!(),
 		}
@@ -77,10 +93,29 @@ impl fmt::Display for Transaction {
 
 impl Transaction {
 	// --------------------------------------------------
+	// Configuration methods
+	// --------------------------------------------------
+
+	pub fn rollback_with_warning(mut self) -> Self {
+		self.check_level(Check::Warn);
+		self
+	}
+
+	pub fn rollback_with_panic(mut self) -> Self {
+		self.check_level(Check::Panic);
+		self
+	}
+
+	pub fn rollback_and_ignore(mut self) -> Self {
+		self.check_level(Check::None);
+		self
+	}
+
+	// --------------------------------------------------
 	// Integral methods
 	// --------------------------------------------------
 
-	/// Check if transactions is finished.
+	/// Check if transaction is finished.
 	///
 	/// If the transaction has been cancelled or committed,
 	/// then this function will return [`true`], and any further
@@ -88,7 +123,7 @@ impl Transaction {
 	/// in a [`Error::TxFinished`] error.
 	pub async fn closed(&self) -> bool {
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Closed");
+		trace!("Closed");
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -98,6 +133,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.closed(),
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.closed(),
 			#[cfg(feature = "kv-indxdb")]
@@ -112,7 +152,7 @@ impl Transaction {
 			} => v.closed(),
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.closed(),
 			#[allow(unreachable_patterns)]
@@ -125,7 +165,7 @@ impl Transaction {
 	/// This reverses all changes made within the transaction.
 	pub async fn cancel(&mut self) -> Result<(), Error> {
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Cancel");
+		trace!("Cancel");
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -135,6 +175,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.cancel().await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.cancel().await,
 			#[cfg(feature = "kv-indxdb")]
@@ -149,7 +194,7 @@ impl Transaction {
 			} => v.cancel().await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.cancel().await,
 			#[allow(unreachable_patterns)]
@@ -162,7 +207,7 @@ impl Transaction {
 	/// This attempts to commit all changes made within the transaction.
 	pub async fn commit(&mut self) -> Result<(), Error> {
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Commit");
+		trace!("Commit");
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -172,6 +217,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.commit().await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.commit().await,
 			#[cfg(feature = "kv-indxdb")]
@@ -186,7 +236,7 @@ impl Transaction {
 			} => v.commit().await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.commit().await,
 			#[allow(unreachable_patterns)]
@@ -201,7 +251,7 @@ impl Transaction {
 		K: Into<Key> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Del {:?}", key);
+		trace!("Del {:?}", key);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -211,6 +261,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.del(key).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.del(key).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -225,7 +280,7 @@ impl Transaction {
 			} => v.del(key).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.del(key).await,
 			#[allow(unreachable_patterns)]
@@ -240,7 +295,7 @@ impl Transaction {
 		K: Into<Key> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Exi {:?}", key);
+		trace!("Exi {:?}", key);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -250,6 +305,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.exi(key).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.exi(key).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -264,7 +324,7 @@ impl Transaction {
 			} => v.exi(key).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.exi(key).await,
 			#[allow(unreachable_patterns)]
@@ -279,7 +339,7 @@ impl Transaction {
 		K: Into<Key> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Get {:?}", key);
+		trace!("Get {:?}", key);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -289,6 +349,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.get(key).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.get(key).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -303,7 +368,7 @@ impl Transaction {
 			} => v.get(key).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.get(key).await,
 			#[allow(unreachable_patterns)]
@@ -319,7 +384,7 @@ impl Transaction {
 		V: Into<Val> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Set {:?} => {:?}", key, val);
+		trace!("Set {:?} => {:?}", key, val);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -329,6 +394,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.set(key, val).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.set(key, val).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -343,9 +413,146 @@ impl Transaction {
 			} => v.set(key, val).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.set(key, val).await,
+			#[allow(unreachable_patterns)]
+			_ => unreachable!(),
+		}
+	}
+
+	/// Obtain a new change timestamp for a key
+	/// which is replaced with the current timestamp when the transaction is committed.
+	/// NOTE: This should be called when composing the change feed entries for this transaction,
+	/// which should be done immediately before the transaction commit.
+	/// That is to keep other transactions commit delay(pessimistic) or conflict(optimistic) as less as possible.
+	#[allow(unused)]
+	pub async fn get_timestamp<K>(&mut self, key: K, lock: bool) -> Result<Versionstamp, Error>
+	where
+		K: Into<Key> + Debug,
+	{
+		#[cfg(debug_assertions)]
+		trace!("Get Timestamp {:?}", key);
+		match self {
+			#[cfg(feature = "kv-mem")]
+			Transaction {
+				inner: Inner::Mem(v),
+				..
+			} => v.get_timestamp(key),
+			#[cfg(feature = "kv-rocksdb")]
+			Transaction {
+				inner: Inner::RocksDB(v),
+				..
+			} => v.get_timestamp(key).await,
+			#[cfg(feature = "kv-indxdb")]
+			Transaction {
+				inner: Inner::IndxDB(v),
+				..
+			} => v.get_timestamp(key).await,
+			#[cfg(feature = "kv-tikv")]
+			Transaction {
+				inner: Inner::TiKV(v),
+				..
+			} => v.get_timestamp(key, lock).await,
+			#[cfg(feature = "kv-fdb")]
+			Transaction {
+				inner: Inner::FoundationDB(v),
+				..
+			} => v.get_timestamp().await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
+				..
+			} => v.get_timestamp(key).await,
+			#[allow(unreachable_patterns)]
+			_ => unreachable!(),
+		}
+	}
+
+	#[allow(unused)]
+	async fn get_non_monotonic_versionstamp(&mut self) -> Result<Versionstamp, Error> {
+		Ok(self.vso.lock().await.now())
+	}
+
+	#[allow(unused)]
+	async fn get_non_monotonic_versionstamped_key<K>(
+		&mut self,
+		prefix: K,
+		suffix: K,
+	) -> Result<Vec<u8>, Error>
+	where
+		K: Into<Key>,
+	{
+		let prefix: Key = prefix.into();
+		let suffix: Key = suffix.into();
+		let ts = self.get_non_monotonic_versionstamp().await?;
+		let mut k: Vec<u8> = prefix.clone();
+		k.append(&mut ts.to_vec());
+		k.append(&mut suffix.clone());
+		Ok(k)
+	}
+
+	/// Insert or update a key in the datastore.
+	#[allow(unused_variables)]
+	pub async fn set_versionstamped_key<K, V>(
+		&mut self,
+		ts_key: K,
+		prefix: K,
+		suffix: K,
+		val: V,
+	) -> Result<(), Error>
+	where
+		K: Into<Key> + Debug + Clone,
+		V: Into<Val> + Debug,
+	{
+		#[cfg(debug_assertions)]
+		trace!("Set {:?} <ts> {:?} => {:?}", prefix, suffix, val);
+		match self {
+			#[cfg(feature = "kv-mem")]
+			Transaction {
+				inner: Inner::Mem(v),
+				..
+			} => {
+				let k = v.get_versionstamped_key(ts_key, prefix, suffix).await?;
+				v.set(k, val)
+			}
+			#[cfg(feature = "kv-rocksdb")]
+			Transaction {
+				inner: Inner::RocksDB(v),
+				..
+			} => {
+				let k = v.get_versionstamped_key(ts_key, prefix, suffix).await?;
+				v.set(k, val).await
+			}
+			#[cfg(feature = "kv-indxdb")]
+			Transaction {
+				inner: Inner::IndxDB(v),
+				..
+			} => {
+				let k = v.get_versionstamped_key(ts_key, prefix, suffix).await?;
+				v.set(k, val).await
+			}
+			#[cfg(feature = "kv-tikv")]
+			Transaction {
+				inner: Inner::TiKV(v),
+				..
+			} => {
+				let k = v.get_versionstamped_key(ts_key, prefix, suffix).await?;
+				v.set(k, val).await
+			}
+			#[cfg(feature = "kv-fdb")]
+			Transaction {
+				inner: Inner::FoundationDB(v),
+				..
+			} => v.set_versionstamped_key(prefix, suffix, val).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
+				..
+			} => {
+				let k = v.get_versionstamped_key(ts_key, prefix, suffix).await?;
+				v.set(k, val).await
+			}
 			#[allow(unreachable_patterns)]
 			_ => unreachable!(),
 		}
@@ -359,7 +566,7 @@ impl Transaction {
 		V: Into<Val> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Put {:?} => {:?}", key, val);
+		trace!("Put {:?} => {:?}", key, val);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -369,6 +576,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.put(key, val).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.put(key, val).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -383,7 +595,7 @@ impl Transaction {
 			} => v.put(key, val).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.put(key, val).await,
 			#[allow(unreachable_patterns)]
@@ -400,7 +612,7 @@ impl Transaction {
 		K: Into<Key> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Scan {:?} - {:?}", rng.start, rng.end);
+		trace!("Scan {:?} - {:?}", rng.start, rng.end);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -410,6 +622,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.scan(rng, limit).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.scan(rng, limit).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -424,7 +641,7 @@ impl Transaction {
 			} => v.scan(rng, limit).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.scan(rng, limit).await,
 			#[allow(unreachable_patterns)]
@@ -440,7 +657,7 @@ impl Transaction {
 		V: Into<Val> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Putc {:?} if {:?} => {:?}", key, chk, val);
+		trace!("Putc {:?} if {:?} => {:?}", key, chk, val);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -450,6 +667,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.putc(key, val, chk).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.putc(key, val, chk).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -464,7 +686,7 @@ impl Transaction {
 			} => v.putc(key, val, chk).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.putc(key, val, chk).await,
 			#[allow(unreachable_patterns)]
@@ -480,7 +702,7 @@ impl Transaction {
 		V: Into<Val> + Debug,
 	{
 		#[cfg(debug_assertions)]
-		trace!(target: LOG, "Delc {:?} if {:?}", key, chk);
+		trace!("Delc {:?} if {:?}", key, chk);
 		match self {
 			#[cfg(feature = "kv-mem")]
 			Transaction {
@@ -490,6 +712,11 @@ impl Transaction {
 			#[cfg(feature = "kv-rocksdb")]
 			Transaction {
 				inner: Inner::RocksDB(v),
+				..
+			} => v.delc(key, chk).await,
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(v),
 				..
 			} => v.delc(key, chk).await,
 			#[cfg(feature = "kv-indxdb")]
@@ -504,7 +731,7 @@ impl Transaction {
 			} => v.delc(key, chk).await,
 			#[cfg(feature = "kv-fdb")]
 			Transaction {
-				inner: Inner::FDB(v),
+				inner: Inner::FoundationDB(v),
 				..
 			} => v.delc(key, chk).await,
 			#[allow(unreachable_patterns)]
@@ -729,9 +956,236 @@ impl Transaction {
 		Ok(())
 	}
 
+	// Register cluster membership
+	// NOTE: Setting cluster membership sets the heartbeat
+	// Remember to set the heartbeat as well
+	pub async fn set_nd(&mut self, id: Uuid) -> Result<(), Error> {
+		let key = crate::key::root::nd::Nd::new(id);
+		match self.get_nd(id).await? {
+			Some(_) => Err(Error::ClAlreadyExists {
+				value: id.to_string(),
+			}),
+			None => {
+				let value = ClusterMembership {
+					name: id.to_string(),
+					heartbeat: self.clock(),
+				};
+				self.put(key, value).await?;
+				Ok(())
+			}
+		}
+	}
+
+	// Retrieve cluster information
+	pub async fn get_nd(&mut self, id: Uuid) -> Result<Option<ClusterMembership>, Error> {
+		let key = crate::key::root::nd::Nd::new(id);
+		let val = self.get(key).await?;
+		match val {
+			Some(v) => Ok(Some::<ClusterMembership>(v.into())),
+			None => Ok(None),
+		}
+	}
+
+	pub(crate) fn clock(&self) -> Timestamp {
+		// Use a timestamp oracle if available
+		let now: u128 = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+		Timestamp {
+			value: now as u64,
+		}
+	}
+
+	// Set heartbeat
+	pub async fn set_hb(&mut self, timestamp: Timestamp, id: Uuid) -> Result<(), Error> {
+		let key = crate::key::root::hb::Hb::new(timestamp.clone(), id);
+		// We do not need to do a read, we always want to overwrite
+		self.put(
+			key,
+			ClusterMembership {
+				name: id.to_string(),
+				heartbeat: timestamp,
+			},
+		)
+		.await?;
+		Ok(())
+	}
+
+	// Delete a cluster registration entry
+	pub async fn del_nd(&mut self, node: Uuid) -> Result<(), Error> {
+		let key = crate::key::root::nd::Nd::new(node);
+		self.del(key).await
+	}
+
+	// Delete the live query notification registry on the table
+	// Return the Table ID
+	pub async fn del_ndlv(&mut self, nd: &Uuid) -> Result<Uuid, Error> {
+		// This isn't implemented because it is covered by del_nd
+		// Will add later for remote node kill
+		Err(Error::NdNotFound {
+			value: format!("Missing cluster node {:?}", nd),
+		})
+	}
+
+	// Scans up until the heartbeat timestamp and returns the discovered nodes
+	pub async fn scan_hb(
+		&mut self,
+		time_to: &Timestamp,
+		limit: u32,
+	) -> Result<Vec<crate::key::root::hb::Hb>, Error> {
+		let beg = crate::key::root::hb::Hb::prefix();
+		let end = crate::key::root::hb::Hb::suffix(time_to);
+		trace!("Scan start: {} ({:?})", String::from_utf8_lossy(&beg).to_string(), &beg);
+		trace!("Scan end: {} ({:?})", String::from_utf8_lossy(&end).to_string(), &end);
+		let mut nxt: Option<Key> = None;
+		let mut num = limit;
+		let mut out: Vec<crate::key::root::hb::Hb> = vec![];
+		// Start processing
+		while num > 0 {
+			// Get records batch
+			let res = match nxt {
+				None => {
+					let min = beg.clone();
+					let max = end.clone();
+					let num = std::cmp::min(1000, num);
+					self.scan(min..max, num).await?
+				}
+				Some(ref mut beg) => {
+					beg.push(0x00);
+					let min = beg.clone();
+					let max = end.clone();
+					let num = std::cmp::min(1000, num);
+					self.scan(min..max, num).await?
+				}
+			};
+			// Get total results
+			let n = res.len();
+			// Exit when settled
+			if n == 0 {
+				break;
+			}
+			// Loop over results
+			for (i, (k, _)) in res.into_iter().enumerate() {
+				// Ready the next
+				if n == i + 1 {
+					nxt = Some(k.clone());
+				}
+				out.push(crate::key::root::hb::Hb::decode(k.as_slice())?);
+				// Count
+				num -= 1;
+			}
+		}
+		trace!("scan_hb: {:?}", out);
+		Ok(out)
+	}
+
+	pub async fn scan_cl(&mut self, limit: u32) -> Result<Vec<ClusterMembership>, Error> {
+		let beg = crate::key::root::nd::Nd::prefix();
+		let end = crate::key::root::nd::Nd::suffix();
+		trace!("Scan start: {} ({:?})", String::from_utf8_lossy(&beg).to_string(), &beg);
+		trace!("Scan end: {} ({:?})", String::from_utf8_lossy(&end).to_string(), &end);
+		let mut nxt: Option<Key> = None;
+		let mut num = limit;
+		let mut out: Vec<ClusterMembership> = vec![];
+		// Start processing
+		while num > 0 {
+			// Get records batch
+			let res = match nxt {
+				None => {
+					let min = beg.clone();
+					let max = end.clone();
+					let num = std::cmp::min(1000, num);
+					self.scan(min..max, num).await?
+				}
+				Some(ref mut beg) => {
+					beg.push(0x00);
+					let min = beg.clone();
+					let max = end.clone();
+					let num = std::cmp::min(1000, num);
+					self.scan(min..max, num).await?
+				}
+			};
+			// Get total results
+			let n = res.len();
+			// Exit when settled
+			if n == 0 {
+				break;
+			}
+			// Loop over results
+			for (i, (k, v)) in res.into_iter().enumerate() {
+				// Ready the next
+				if n == i + 1 {
+					nxt = Some(k.clone());
+				}
+				out.push((&v).into());
+				// Count
+				num -= 1;
+			}
+		}
+		trace!("scan_hb: {:?}", out);
+		Ok(out)
+	}
+
+	pub async fn delr_hb(
+		&mut self,
+		ts: Vec<crate::key::root::hb::Hb>,
+		limit: u32,
+	) -> Result<(), Error> {
+		trace!("delr_hb: ts={:?} limit={:?}", ts, limit);
+		for hb in ts.into_iter() {
+			self.del(hb).await?;
+		}
+		Ok(())
+	}
+
+	pub async fn del_lv(&mut self, ns: &str, db: &str, tb: &str, lv: Uuid) -> Result<(), Error> {
+		trace!("del_lv: ns={:?} db={:?} tb={:?} lv={:?}", ns, db, tb, lv);
+		let key = crate::key::table::lq::new(ns, db, tb, lv);
+		self.cache.del(&key.clone().into());
+		self.del(key).await
+	}
+
+	pub async fn scan_lq<'a>(&mut self, node: &Uuid, limit: u32) -> Result<Vec<LqValue>, Error> {
+		let pref = crate::key::node::lq::prefix_nd(node);
+		let suff = crate::key::node::lq::suffix_nd(node);
+		trace!(
+			"Scanning range from pref={}, suff={}",
+			crate::key::debug::sprint_key(&pref),
+			crate::key::debug::sprint_key(&suff),
+		);
+		let rng = pref..suff;
+		let scanned = self.scan(rng, limit).await?;
+		let mut res: Vec<LqValue> = vec![];
+		for (key, value) in scanned {
+			trace!("scan_lq: key={:?} value={:?}", &key, &value);
+			let lq = crate::key::node::lq::Lq::decode(key.as_slice())?;
+			let tb: String = String::from_utf8(value).unwrap();
+			res.push(LqValue {
+				nd: crate::sql::uuid::Uuid::from(lq.nd),
+				ns: lq.ns.to_string(),
+				db: lq.db.to_string(),
+				tb,
+				lq: crate::sql::uuid::Uuid::from(lq.lq),
+			});
+		}
+		Ok(res)
+	}
+
+	pub async fn putc_lv(
+		&mut self,
+		ns: &str,
+		db: &str,
+		tb: &str,
+		live_stm: LiveStatement,
+		expected: Option<LiveStatement>,
+	) -> Result<(), Error> {
+		let key = crate::key::table::lq::new(ns, db, tb, live_stm.id.0);
+		let key_enc = crate::key::table::lq::Lq::encode(&key)?;
+		trace!("putc_lv ({:?}): key={:?}", &live_stm.id, crate::key::debug::sprint_key(&key_enc));
+		self.putc(key_enc, live_stm, expected).await
+	}
+
 	/// Retrieve all namespace definitions in a datastore.
 	pub async fn all_ns(&mut self) -> Result<Arc<[DefineNamespaceStatement]>, Error> {
-		let key = crate::key::ns::prefix();
+		let key = crate::key::root::ns::prefix();
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Nss(v) = e {
 				v
@@ -739,8 +1193,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::ns::prefix();
-			let end = crate::key::ns::suffix();
+			let beg = crate::key::root::ns::prefix();
+			let end = crate::key::root::ns::suffix();
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Nss(Arc::clone(&val)));
@@ -750,7 +1204,7 @@ impl Transaction {
 
 	/// Retrieve all namespace login definitions for a specific namespace.
 	pub async fn all_nl(&mut self, ns: &str) -> Result<Arc<[DefineLoginStatement]>, Error> {
-		let key = crate::key::nl::prefix(ns);
+		let key = crate::key::namespace::lg::prefix(ns);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Nls(v) = e {
 				v
@@ -758,8 +1212,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::nl::prefix(ns);
-			let end = crate::key::nl::suffix(ns);
+			let beg = crate::key::namespace::lg::prefix(ns);
+			let end = crate::key::namespace::lg::suffix(ns);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Nls(Arc::clone(&val)));
@@ -767,9 +1221,18 @@ impl Transaction {
 		})
 	}
 
+	/// Retrieve all namespace user definitions for a specific namespace.
+	pub async fn all_ns_users(&mut self, ns: &str) -> Result<Arc<[DefineUserStatement]>, Error> {
+		let beg = crate::key::namespace::us::prefix(ns);
+		let end = crate::key::namespace::us::suffix(ns);
+		let val = self.getr(beg..end, u32::MAX).await?;
+		let val = val.convert().into();
+		Ok(val)
+	}
+
 	/// Retrieve all namespace token definitions for a specific namespace.
 	pub async fn all_nt(&mut self, ns: &str) -> Result<Arc<[DefineTokenStatement]>, Error> {
-		let key = crate::key::nt::prefix(ns);
+		let key = crate::key::namespace::tk::prefix(ns);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Nts(v) = e {
 				v
@@ -777,8 +1240,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::nt::prefix(ns);
-			let end = crate::key::nt::suffix(ns);
+			let beg = crate::key::namespace::tk::prefix(ns);
+			let end = crate::key::namespace::tk::suffix(ns);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Nts(Arc::clone(&val)));
@@ -788,7 +1251,7 @@ impl Transaction {
 
 	/// Retrieve all database definitions for a specific namespace.
 	pub async fn all_db(&mut self, ns: &str) -> Result<Arc<[DefineDatabaseStatement]>, Error> {
-		let key = crate::key::db::prefix(ns);
+		let key = crate::key::namespace::db::prefix(ns);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Dbs(v) = e {
 				v
@@ -796,8 +1259,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::db::prefix(ns);
-			let end = crate::key::db::suffix(ns);
+			let beg = crate::key::namespace::db::prefix(ns);
+			let end = crate::key::namespace::db::suffix(ns);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Dbs(Arc::clone(&val)));
@@ -811,7 +1274,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<[DefineLoginStatement]>, Error> {
-		let key = crate::key::dl::prefix(ns, db);
+		let key = crate::key::database::lg::prefix(ns, db);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Dls(v) = e {
 				v
@@ -819,13 +1282,26 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::dl::prefix(ns, db);
-			let end = crate::key::dl::suffix(ns, db);
+			let beg = crate::key::database::lg::prefix(ns, db);
+			let end = crate::key::database::lg::suffix(ns, db);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Dls(Arc::clone(&val)));
 			val
 		})
+	}
+
+	/// Retrieve all database user definitions for a specific database.
+	pub async fn all_db_users(
+		&mut self,
+		ns: &str,
+		db: &str,
+	) -> Result<Arc<[DefineUserStatement]>, Error> {
+		let beg = crate::key::database::us::prefix(ns, db);
+		let end = crate::key::database::us::suffix(ns, db);
+		let val = self.getr(beg..end, u32::MAX).await?;
+		let val = val.convert().into();
+		Ok(val)
 	}
 
 	/// Retrieve all database token definitions for a specific database.
@@ -834,7 +1310,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<[DefineTokenStatement]>, Error> {
-		let key = crate::key::dt::prefix(ns, db);
+		let key = crate::key::database::tk::prefix(ns, db);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Dts(v) = e {
 				v
@@ -842,8 +1318,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::dt::prefix(ns, db);
-			let end = crate::key::dt::suffix(ns, db);
+			let beg = crate::key::database::tk::prefix(ns, db);
+			let end = crate::key::database::tk::suffix(ns, db);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Dts(Arc::clone(&val)));
@@ -857,7 +1333,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<[DefineFunctionStatement]>, Error> {
-		let key = crate::key::fc::prefix(ns, db);
+		let key = crate::key::database::fc::prefix(ns, db);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Fcs(v) = e {
 				v
@@ -865,8 +1341,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::fc::prefix(ns, db);
-			let end = crate::key::fc::suffix(ns, db);
+			let beg = crate::key::database::fc::prefix(ns, db);
+			let end = crate::key::database::fc::suffix(ns, db);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Fcs(Arc::clone(&val)));
@@ -880,7 +1356,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<[DefineScopeStatement]>, Error> {
-		let key = crate::key::sc::prefix(ns, db);
+		let key = crate::key::database::sc::prefix(ns, db);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Scs(v) = e {
 				v
@@ -888,8 +1364,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::sc::prefix(ns, db);
-			let end = crate::key::sc::suffix(ns, db);
+			let beg = crate::key::database::sc::prefix(ns, db);
+			let end = crate::key::database::sc::suffix(ns, db);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Scs(Arc::clone(&val)));
@@ -904,7 +1380,7 @@ impl Transaction {
 		db: &str,
 		sc: &str,
 	) -> Result<Arc<[DefineTokenStatement]>, Error> {
-		let key = crate::key::st::prefix(ns, db, sc);
+		let key = crate::key::scope::tk::prefix(ns, db, sc);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Sts(v) = e {
 				v
@@ -912,8 +1388,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::st::prefix(ns, db, sc);
-			let end = crate::key::st::suffix(ns, db, sc);
+			let beg = crate::key::scope::tk::prefix(ns, db, sc);
+			let end = crate::key::scope::tk::suffix(ns, db, sc);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Sts(Arc::clone(&val)));
@@ -921,13 +1397,13 @@ impl Transaction {
 		})
 	}
 
-	/// Retrieve all scope definitions for a specific database.
+	/// Retrieve all param definitions for a specific database.
 	pub async fn all_pa(
 		&mut self,
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<[DefineParamStatement]>, Error> {
-		let key = crate::key::pa::prefix(ns, db);
+		let key = crate::key::database::pa::prefix(ns, db);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Pas(v) = e {
 				v
@@ -935,8 +1411,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::pa::prefix(ns, db);
-			let end = crate::key::pa::suffix(ns, db);
+			let beg = crate::key::database::pa::prefix(ns, db);
+			let end = crate::key::database::pa::suffix(ns, db);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Pas(Arc::clone(&val)));
@@ -950,7 +1426,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<[DefineTableStatement]>, Error> {
-		let key = crate::key::tb::prefix(ns, db);
+		let key = crate::key::database::tb::prefix(ns, db);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Tbs(v) = e {
 				v
@@ -958,8 +1434,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::tb::prefix(ns, db);
-			let end = crate::key::tb::suffix(ns, db);
+			let beg = crate::key::database::tb::prefix(ns, db);
+			let end = crate::key::database::tb::suffix(ns, db);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Tbs(Arc::clone(&val)));
@@ -974,7 +1450,7 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<Arc<[DefineEventStatement]>, Error> {
-		let key = crate::key::ev::prefix(ns, db, tb);
+		let key = crate::key::table::ev::prefix(ns, db, tb);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Evs(v) = e {
 				v
@@ -982,8 +1458,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::ev::prefix(ns, db, tb);
-			let end = crate::key::ev::suffix(ns, db, tb);
+			let beg = crate::key::table::ev::prefix(ns, db, tb);
+			let end = crate::key::table::ev::suffix(ns, db, tb);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Evs(Arc::clone(&val)));
@@ -998,7 +1474,7 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<Arc<[DefineFieldStatement]>, Error> {
-		let key = crate::key::fd::prefix(ns, db, tb);
+		let key = crate::key::table::fd::prefix(ns, db, tb);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Fds(v) = e {
 				v
@@ -1006,8 +1482,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::fd::prefix(ns, db, tb);
-			let end = crate::key::fd::suffix(ns, db, tb);
+			let beg = crate::key::table::fd::prefix(ns, db, tb);
+			let end = crate::key::table::fd::suffix(ns, db, tb);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Fds(Arc::clone(&val)));
@@ -1022,7 +1498,7 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<Arc<[DefineIndexStatement]>, Error> {
-		let key = crate::key::ix::prefix(ns, db, tb);
+		let key = crate::key::table::ix::prefix(ns, db, tb);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Ixs(v) = e {
 				v
@@ -1030,8 +1506,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::ix::prefix(ns, db, tb);
-			let end = crate::key::ix::suffix(ns, db, tb);
+			let beg = crate::key::table::ix::prefix(ns, db, tb);
+			let end = crate::key::table::ix::suffix(ns, db, tb);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Ixs(Arc::clone(&val)));
@@ -1046,7 +1522,7 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<Arc<[DefineTableStatement]>, Error> {
-		let key = crate::key::ft::prefix(ns, db, tb);
+		let key = crate::key::table::ft::prefix(ns, db, tb);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Fts(v) = e {
 				v
@@ -1054,8 +1530,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::ft::prefix(ns, db, tb);
-			let end = crate::key::ft::suffix(ns, db, tb);
+			let beg = crate::key::table::ft::prefix(ns, db, tb);
+			let end = crate::key::table::ft::suffix(ns, db, tb);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Fts(Arc::clone(&val)));
@@ -1070,7 +1546,7 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<Arc<[LiveStatement]>, Error> {
-		let key = crate::key::lv::prefix(ns, db, tb);
+		let key = crate::key::table::lq::prefix(ns, db, tb);
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Lvs(v) = e {
 				v
@@ -1078,8 +1554,8 @@ impl Transaction {
 				unreachable!();
 			}
 		} else {
-			let beg = crate::key::lv::prefix(ns, db, tb);
-			let end = crate::key::lv::suffix(ns, db, tb);
+			let beg = crate::key::table::lq::prefix(ns, db, tb);
+			let end = crate::key::table::lq::suffix(ns, db, tb);
 			let val = self.getr(beg..end, u32::MAX).await?;
 			let val = val.convert().into();
 			self.cache.set(key, Entry::Lvs(Arc::clone(&val)));
@@ -1087,9 +1563,65 @@ impl Transaction {
 		})
 	}
 
+	pub async fn all_lq(&mut self, nd: &uuid::Uuid) -> Result<Vec<LqValue>, Error> {
+		let beg = crate::key::node::lq::prefix_nd(nd);
+		let end = crate::key::node::lq::suffix_nd(nd);
+		let lq_pairs = self.getr(beg..end, u32::MAX).await?;
+		let mut lqs = vec![];
+		for (key, value) in lq_pairs {
+			let lq_key = crate::key::node::lq::Lq::decode(key.as_slice())?;
+			trace!("Value is {:?}", &value);
+			let lq_value = String::from_utf8(value).map_err(|e| {
+				Error::Internal(format!("Failed to decode a value while reading LQ: {}", e))
+			})?;
+			let lqv = LqValue {
+				nd: crate::sql::uuid::Uuid::from(*nd),
+				ns: lq_key.ns.to_string(),
+				db: lq_key.db.to_string(),
+				tb: lq_value,
+				lq: crate::sql::uuid::Uuid::from(lq_key.lq),
+			};
+			lqs.push(lqv);
+		}
+		Ok(lqs)
+	}
+
+	/// Retrieve all analyzer definitions for a specific database.
+	pub async fn all_az(
+		&mut self,
+		ns: &str,
+		db: &str,
+	) -> Result<Arc<[DefineAnalyzerStatement]>, Error> {
+		let key = crate::key::database::az::prefix(ns, db);
+		Ok(if let Some(e) = self.cache.get(&key) {
+			if let Entry::Azs(v) = e {
+				v
+			} else {
+				unreachable!();
+			}
+		} else {
+			let beg = crate::key::database::az::prefix(ns, db);
+			let end = crate::key::database::az::suffix(ns, db);
+			let val = self.getr(beg..end, u32::MAX).await?;
+			let val = val.convert().into();
+			self.cache.set(key, Entry::Azs(Arc::clone(&val)));
+			val
+		})
+	}
+
+	/// Retrieve all ROOT users.
+	pub async fn all_root_users(&mut self) -> Result<Arc<[DefineUserStatement]>, Error> {
+		let beg = crate::key::root::us::prefix();
+		let end = crate::key::root::us::suffix();
+
+		let val = self.getr(beg..end, u32::MAX).await?;
+		let val = val.convert().into();
+		Ok(val)
+	}
+
 	/// Retrieve a specific namespace definition.
 	pub async fn get_ns(&mut self, ns: &str) -> Result<DefineNamespaceStatement, Error> {
-		let key = crate::key::ns::new(ns);
+		let key = crate::key::root::ns::new(ns);
 		let val = self.get(key).await?.ok_or(Error::NsNotFound {
 			value: ns.to_owned(),
 		})?;
@@ -1098,7 +1630,7 @@ impl Transaction {
 
 	/// Retrieve a specific namespace login definition.
 	pub async fn get_nl(&mut self, ns: &str, nl: &str) -> Result<DefineLoginStatement, Error> {
-		let key = crate::key::nl::new(ns, nl);
+		let key = crate::key::namespace::lg::new(ns, nl);
 		let val = self.get(key).await?.ok_or(Error::NlNotFound {
 			value: nl.to_owned(),
 		})?;
@@ -1107,7 +1639,7 @@ impl Transaction {
 
 	/// Retrieve a specific namespace token definition.
 	pub async fn get_nt(&mut self, ns: &str, nt: &str) -> Result<DefineTokenStatement, Error> {
-		let key = crate::key::nt::new(ns, nt);
+		let key = crate::key::namespace::tk::new(ns, nt);
 		let val = self.get(key).await?.ok_or(Error::NtNotFound {
 			value: nt.to_owned(),
 		})?;
@@ -1116,7 +1648,7 @@ impl Transaction {
 
 	/// Retrieve a specific database definition.
 	pub async fn get_db(&mut self, ns: &str, db: &str) -> Result<DefineDatabaseStatement, Error> {
-		let key = crate::key::db::new(ns, db);
+		let key = crate::key::namespace::db::new(ns, db);
 		let val = self.get(key).await?.ok_or(Error::DbNotFound {
 			value: db.to_owned(),
 		})?;
@@ -1130,7 +1662,7 @@ impl Transaction {
 		db: &str,
 		dl: &str,
 	) -> Result<DefineLoginStatement, Error> {
-		let key = crate::key::dl::new(ns, db, dl);
+		let key = crate::key::database::lg::new(ns, db, dl);
 		let val = self.get(key).await?.ok_or(Error::DlNotFound {
 			value: dl.to_owned(),
 		})?;
@@ -1144,7 +1676,7 @@ impl Transaction {
 		db: &str,
 		dt: &str,
 	) -> Result<DefineTokenStatement, Error> {
-		let key = crate::key::dt::new(ns, db, dt);
+		let key = crate::key::database::tk::new(ns, db, dt);
 		let val = self.get(key).await?.ok_or(Error::DtNotFound {
 			value: dt.to_owned(),
 		})?;
@@ -1158,7 +1690,7 @@ impl Transaction {
 		db: &str,
 		sc: &str,
 	) -> Result<DefineScopeStatement, Error> {
-		let key = crate::key::sc::new(ns, db, sc);
+		let key = crate::key::database::sc::new(ns, db, sc);
 		let val = self.get(key).await?.ok_or(Error::ScNotFound {
 			value: sc.to_owned(),
 		})?;
@@ -1173,7 +1705,7 @@ impl Transaction {
 		sc: &str,
 		st: &str,
 	) -> Result<DefineTokenStatement, Error> {
-		let key = crate::key::st::new(ns, db, sc, st);
+		let key = crate::key::scope::tk::new(ns, db, sc, st);
 		let val = self.get(key).await?.ok_or(Error::StNotFound {
 			value: st.to_owned(),
 		})?;
@@ -1187,9 +1719,40 @@ impl Transaction {
 		db: &str,
 		fc: &str,
 	) -> Result<DefineFunctionStatement, Error> {
-		let key = crate::key::fc::new(ns, db, fc);
+		let key = crate::key::database::fc::new(ns, db, fc);
 		let val = self.get(key).await?.ok_or(Error::FcNotFound {
 			value: fc.to_owned(),
+		})?;
+		Ok(val.into())
+	}
+
+	/// Return the table stored at the lq address
+	pub async fn get_lq(
+		&mut self,
+		nd: Uuid,
+		ns: &str,
+		db: &str,
+		lq: Uuid,
+	) -> Result<Strand, Error> {
+		let key = crate::key::node::lq::new(nd, lq, ns, db);
+		let val = self.get(key).await?.ok_or(Error::LqNotFound {
+			value: lq.to_string(),
+		})?;
+		Value::from(val).convert_to_strand()
+	}
+
+	pub async fn get_lv(
+		&mut self,
+		ns: &str,
+		db: &str,
+		tb: &str,
+		lv: &Uuid,
+	) -> Result<LiveStatement, Error> {
+		let key = crate::key::table::lq::new(ns, db, tb, *lv);
+		let key_enc = crate::key::table::lq::Lq::encode(&key)?;
+		trace!("Getting lv ({:?}) {:?}", lv, crate::key::debug::sprint_key(&key_enc));
+		let val = self.get(key_enc).await?.ok_or(Error::LvNotFound {
+			value: lv.to_string(),
 		})?;
 		Ok(val.into())
 	}
@@ -1201,7 +1764,7 @@ impl Transaction {
 		db: &str,
 		pa: &str,
 	) -> Result<DefineParamStatement, Error> {
-		let key = crate::key::pa::new(ns, db, pa);
+		let key = crate::key::database::pa::new(ns, db, pa);
 		let val = self.get(key).await?.ok_or(Error::PaNotFound {
 			value: pa.to_owned(),
 		})?;
@@ -1215,9 +1778,75 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<DefineTableStatement, Error> {
-		let key = crate::key::tb::new(ns, db, tb);
+		let key = crate::key::database::tb::new(ns, db, tb);
 		let val = self.get(key).await?.ok_or(Error::TbNotFound {
 			value: tb.to_owned(),
+		})?;
+		Ok(val.into())
+	}
+	/// Retrieve a specific analyzer definition.
+	pub async fn get_az(
+		&mut self,
+		ns: &str,
+		db: &str,
+		az: &str,
+	) -> Result<DefineAnalyzerStatement, Error> {
+		let key = crate::key::database::az::new(ns, db, az);
+		let val = self.get(key).await?.ok_or(Error::AzNotFound {
+			value: az.to_owned(),
+		})?;
+		Ok(val.into())
+	}
+	/// Retrieve a specific analyzer definition.
+	pub async fn get_ix(
+		&mut self,
+		ns: &str,
+		db: &str,
+		tb: &str,
+		ix: &str,
+	) -> Result<DefineIndexStatement, Error> {
+		let key = crate::key::table::ix::new(ns, db, tb, ix);
+		let val = self.get(key).await?.ok_or(Error::IxNotFound {
+			value: ix.to_owned(),
+		})?;
+		Ok(val.into())
+	}
+
+	/// Retrieve a specific user definition from ROOT.
+	pub async fn get_root_user(&mut self, user: &str) -> Result<DefineUserStatement, Error> {
+		let key = crate::key::root::us::new(user);
+		let val = self.get(key).await?.ok_or(Error::UserRootNotFound {
+			value: user.to_owned(),
+		})?;
+		Ok(val.into())
+	}
+
+	/// Retrieve a specific user definition from a namespace.
+	pub async fn get_ns_user(
+		&mut self,
+		ns: &str,
+		user: &str,
+	) -> Result<DefineUserStatement, Error> {
+		let key = crate::key::namespace::us::new(ns, user);
+		let val = self.get(key).await?.ok_or(Error::UserNsNotFound {
+			value: user.to_owned(),
+			ns: ns.to_owned(),
+		})?;
+		Ok(val.into())
+	}
+
+	/// Retrieve a specific user definition from a database.
+	pub async fn get_db_user(
+		&mut self,
+		ns: &str,
+		db: &str,
+		user: &str,
+	) -> Result<DefineUserStatement, Error> {
+		let key = crate::key::database::us::new(ns, db, user);
+		let val = self.get(key).await?.ok_or(Error::UserDbNotFound {
+			value: user.to_owned(),
+			ns: ns.to_owned(),
+			db: db.to_owned(),
 		})?;
 		Ok(val.into())
 	}
@@ -1233,7 +1862,7 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::ns::new(ns);
+					let key = crate::key::root::ns::new(ns);
 					let val = DefineNamespaceStatement {
 						name: ns.to_owned().into(),
 					};
@@ -1261,9 +1890,10 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::db::new(ns, db);
+					let key = crate::key::namespace::db::new(ns, db);
 					let val = DefineDatabaseStatement {
 						name: db.to_owned().into(),
+						changefeed: None,
 					};
 					self.put(key, &val).await?;
 					Ok(val)
@@ -1290,7 +1920,7 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::sc::new(ns, db, sc);
+					let key = crate::key::database::sc::new(ns, db, sc);
 					let val = DefineScopeStatement {
 						name: sc.to_owned().into(),
 						..DefineScopeStatement::default()
@@ -1320,10 +1950,11 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::tb::new(ns, db, tb);
+					let key = crate::key::database::tb::new(ns, db, tb);
 					let val = DefineTableStatement {
 						name: tb.to_owned().into(),
 						permissions: Permissions::none(),
+						changefeed: None,
 						..DefineTableStatement::default()
 					};
 					self.put(key, &val).await?;
@@ -1343,7 +1974,7 @@ impl Transaction {
 		&mut self,
 		ns: &str,
 	) -> Result<Arc<DefineNamespaceStatement>, Error> {
-		let key = crate::key::ns::new(ns).encode()?;
+		let key = crate::key::root::ns::new(ns).encode()?;
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Ns(v) = e {
 				v
@@ -1366,7 +1997,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 	) -> Result<Arc<DefineDatabaseStatement>, Error> {
-		let key = crate::key::db::new(ns, db).encode()?;
+		let key = crate::key::namespace::db::new(ns, db).encode()?;
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Db(v) = e {
 				v
@@ -1390,7 +2021,7 @@ impl Transaction {
 		db: &str,
 		tb: &str,
 	) -> Result<Arc<DefineTableStatement>, Error> {
-		let key = crate::key::tb::new(ns, db, tb).encode()?;
+		let key = crate::key::database::tb::new(ns, db, tb).encode()?;
 		Ok(if let Some(e) = self.cache.get(&key) {
 			if let Entry::Tb(v) = e {
 				v
@@ -1418,7 +2049,7 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::ns::new(ns);
+					let key = crate::key::root::ns::new(ns);
 					let val = DefineNamespaceStatement {
 						name: ns.to_owned().into(),
 					};
@@ -1446,9 +2077,10 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::db::new(ns, db);
+					let key = crate::key::namespace::db::new(ns, db);
 					let val = DefineDatabaseStatement {
 						name: db.to_owned().into(),
+						changefeed: None,
 					};
 					self.put(key, &val).await?;
 					Ok(Arc::new(val))
@@ -1475,10 +2107,11 @@ impl Transaction {
 				value,
 			}) => match strict {
 				false => {
-					let key = crate::key::tb::new(ns, db, tb);
+					let key = crate::key::database::tb::new(ns, db, tb);
 					let val = DefineTableStatement {
 						name: tb.to_owned().into(),
 						permissions: Permissions::none(),
+						changefeed: None,
 						..DefineTableStatement::default()
 					};
 					self.put(key, &val).await?;
@@ -1610,6 +2243,20 @@ impl Transaction {
 				chn.send(bytes!("")).await?;
 			}
 		}
+		// Output ANALYZERS
+		{
+			let azs = self.all_az(ns, db).await?;
+			if !azs.is_empty() {
+				chn.send(bytes!("-- ------------------------------")).await?;
+				chn.send(bytes!("-- ANALYZERS")).await?;
+				chn.send(bytes!("-- ------------------------------")).await?;
+				chn.send(bytes!("")).await?;
+				for az in azs.iter() {
+					chn.send(bytes!(format!("{az};"))).await?;
+				}
+				chn.send(bytes!("")).await?;
+			}
+		}
 		// Output TABLES
 		{
 			let tbs = self.all_tb(ns, db).await?;
@@ -1664,8 +2311,8 @@ impl Transaction {
 					chn.send(bytes!("-- ------------------------------")).await?;
 					chn.send(bytes!("")).await?;
 					// Fetch records
-					let beg = thing::prefix(ns, db, &tb.name);
-					let end = thing::suffix(ns, db, &tb.name);
+					let beg = crate::key::thing::prefix(ns, db, &tb.name);
+					let end = crate::key::thing::suffix(ns, db, &tb.name);
 					let mut nxt: Option<Vec<u8>> = None;
 					loop {
 						let res = match nxt {
@@ -1696,7 +2343,7 @@ impl Transaction {
 								}
 								// Parse the key and the value
 								let k: crate::key::thing::Thing = (&k).into();
-								let v: crate::sql::value::Value = (&v).into();
+								let v: Value = (&v).into();
 								let t = Thing::from((k.tb, k.id));
 								// Check if this is a graph edge
 								match (v.pick(&*EDGE), v.pick(&*IN), v.pick(&*OUT)) {
@@ -1729,5 +2376,301 @@ impl Transaction {
 		}
 		// Everything exported
 		Ok(())
+	}
+
+	// change will record the change in the changefeed if enabled.
+	// To actually persist the record changes into the underlying kvs,
+	// you must call the `complete_changes` function and then commit the transaction.
+	pub(crate) fn record_change(
+		&mut self,
+		ns: &str,
+		db: &str,
+		tb: &DefineTableStatement,
+		id: &Thing,
+		v: Cow<'_, Value>,
+	) {
+		if tb.changefeed.is_some() {
+			self.cf.update(ns, db, tb.name.to_owned(), id.clone(), v)
+		}
+	}
+
+	// complete_changes will complete the changefeed recording for the given namespace and database.
+	//
+	// Under the hood, this function calls the transaction's `set_versionstamped_key` for each change.
+	// Every change must be recorded by calling this struct's `record_change` function beforehand.
+	// If there was no preceeding `record_change` function calls for this transaction, this function will do nothing.
+	//
+	// This function should be called only after all the changes have been made to the transaction.
+	// Otherwise, changes are missed in the change feed.
+	//
+	// This function should be called immediately before calling the commit function to guarantee that
+	// the lock, if needed by lock=true, is held only for the duration of the commit, not the entire transaction.
+	//
+	// This function is here because it needs access to mutably borrow the transaction.
+	//
+	// Lastly, you should set lock=true if you want the changefeed to be correctly ordered for
+	// non-FDB backends.
+	pub(crate) async fn complete_changes(&mut self, _lock: bool) -> Result<(), Error> {
+		let changes = self.cf.get();
+		for (tskey, prefix, suffix, v) in changes {
+			self.set_versionstamped_key(tskey, prefix, suffix, v).await?
+		}
+		Ok(())
+	}
+
+	// set_timestamp_for_versionstamp correlates the given timestamp with the current versionstamp.
+	// This allows get_versionstamp_from_timestamp to obtain the versionstamp from the timestamp later.
+	pub(crate) async fn set_timestamp_for_versionstamp(
+		&mut self,
+		ts: u64,
+		ns: &str,
+		db: &str,
+		lock: bool,
+	) -> Result<(), Error> {
+		// This also works as an advisory lock on the ts keys so that there is
+		// on other concurrent transactions that can write to the ts_key or the keys after it.
+		let vs = self.get_timestamp(crate::key::database::vs::new(ns, db), lock).await?;
+
+		// Ensure there are no keys after the ts_key
+		// Otherwise we can go back in time!
+		let ts_key = crate::key::database::ts::new(ns, db, ts);
+		let begin = ts_key.encode()?;
+		let end = crate::key::database::ts::suffix(ns, db);
+		let ts_pairs: Vec<(Vec<u8>, Vec<u8>)> = self.getr(begin..end, u32::MAX).await?;
+		let latest_ts_pair = ts_pairs.last();
+		if let Some((k, _)) = latest_ts_pair {
+			let k = crate::key::database::ts::Ts::decode(k)?;
+			let latest_ts = k.ts;
+			if latest_ts >= ts {
+				return Err(Error::Internal(
+					"ts is less than or equal to the latest ts".to_string(),
+				));
+			}
+		}
+		self.set(ts_key, vs).await?;
+		Ok(())
+	}
+
+	pub(crate) async fn get_versionstamp_from_timestamp(
+		&mut self,
+		ts: u64,
+		ns: &str,
+		db: &str,
+		_lock: bool,
+	) -> Result<Option<Versionstamp>, Error> {
+		let start = crate::key::database::ts::prefix(ns, db);
+		let ts_key = crate::key::database::ts::new(ns, db, ts + 1);
+		let end = ts_key.encode()?;
+		let ts_pairs = self.getr(start..end, u32::MAX).await?;
+		let latest_ts_pair = ts_pairs.last();
+		if let Some((_, v)) = latest_ts_pair {
+			if v.len() == 10 {
+				let mut sl = [0u8; 10];
+				sl.copy_from_slice(v);
+				return Ok(Some(sl));
+			} else {
+				return Err(Error::Internal("versionstamp is not 10 bytes".to_string()));
+			}
+		}
+		Ok(None)
+	}
+
+	// --------------------------------------------------
+	// Private methods
+	// --------------------------------------------------
+
+	fn check_level(&mut self, check: Check) {
+		match self {
+			#[cfg(feature = "kv-mem")]
+			Transaction {
+				inner: Inner::Mem(ref mut v),
+				..
+			} => v.check_level(check),
+			#[cfg(feature = "kv-rocksdb")]
+			Transaction {
+				inner: Inner::RocksDB(ref mut v),
+				..
+			} => v.check_level(check),
+			#[cfg(feature = "kv-speedb")]
+			Transaction {
+				inner: Inner::SpeeDB(ref mut v),
+				..
+			} => v.check_level(check),
+			#[cfg(feature = "kv-indxdb")]
+			Transaction {
+				inner: Inner::IndxDB(ref mut v),
+				..
+			} => v.check_level(check),
+			#[cfg(feature = "kv-tikv")]
+			Transaction {
+				inner: Inner::TiKV(ref mut v),
+				..
+			} => v.check_level(check),
+			#[cfg(feature = "kv-fdb")]
+			Transaction {
+				inner: Inner::FoundationDB(ref mut v),
+				..
+			} => v.check_level(check),
+			#[allow(unreachable_patterns)]
+			_ => unreachable!(),
+		}
+	}
+}
+
+#[cfg(test)]
+#[cfg(feature = "kv-mem")]
+mod tests {
+	use crate::{
+		kvs::Datastore,
+		sql::{statements::DefineUserStatement, Base},
+	};
+
+	#[tokio::test]
+	async fn test_get_root_user() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let mut txn = ds.transaction(true, false).await.unwrap();
+
+		// Retrieve non-existent KV user
+		let res = txn.get_root_user("nonexistent").await;
+		assert_eq!(res.err().unwrap().to_string(), "The root user 'nonexistent' does not exist");
+
+		// Create KV user and retrieve it
+		let data = DefineUserStatement {
+			name: "user".into(),
+			base: Base::Root,
+			..Default::default()
+		};
+		let key = crate::key::root::us::new("user");
+		let _ = txn.set(key, data.to_owned()).await.unwrap();
+		let res = txn.get_root_user("user").await.unwrap();
+		assert_eq!(res, data);
+	}
+
+	#[tokio::test]
+	async fn test_get_ns_user() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let mut txn = ds.transaction(true, false).await.unwrap();
+
+		// Retrieve non-existent NS user
+		let res = txn.get_ns_user("ns", "nonexistent").await;
+		assert_eq!(
+			res.err().unwrap().to_string(),
+			"The user 'nonexistent' does not exist in the namespace 'ns'"
+		);
+
+		// Create NS user and retrieve it
+		let data = DefineUserStatement {
+			name: "user".into(),
+			base: Base::Ns,
+			..Default::default()
+		};
+
+		let key = crate::key::namespace::us::new("ns", "user");
+		let _ = txn.set(key, data.to_owned()).await.unwrap();
+		let res = txn.get_ns_user("ns", "user").await.unwrap();
+		assert_eq!(res, data);
+	}
+
+	#[tokio::test]
+	async fn test_get_db_user() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let mut txn = ds.transaction(true, false).await.unwrap();
+
+		// Retrieve non-existent DB user
+		let res = txn.get_db_user("ns", "db", "nonexistent").await;
+		assert_eq!(
+			res.err().unwrap().to_string(),
+			"The user 'nonexistent' does not exist in the database 'db'"
+		);
+
+		// Create DB user and retrieve it
+		let data = DefineUserStatement {
+			name: "user".into(),
+			base: Base::Db,
+			..Default::default()
+		};
+
+		let key = crate::key::database::us::new("ns", "db", "user");
+		let _ = txn.set(key, data.to_owned()).await.unwrap();
+		let res = txn.get_db_user("ns", "db", "user").await.unwrap();
+		assert_eq!(res, data);
+	}
+
+	#[tokio::test]
+	async fn test_all_root_users() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let mut txn = ds.transaction(true, false).await.unwrap();
+
+		// When there are no users
+		let res = txn.all_root_users().await.unwrap();
+		assert_eq!(res.len(), 0);
+
+		// When there are users
+		let data = DefineUserStatement {
+			name: "user".into(),
+			base: Base::Root,
+			..Default::default()
+		};
+
+		let key1 = crate::key::root::us::new("user1");
+		let key2 = crate::key::root::us::new("user2");
+		let _ = txn.set(key1, data.to_owned()).await.unwrap();
+		let _ = txn.set(key2, data.to_owned()).await.unwrap();
+		let res = txn.all_root_users().await.unwrap();
+
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0], data);
+	}
+
+	#[tokio::test]
+	async fn test_all_ns_users() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let mut txn = ds.transaction(true, false).await.unwrap();
+
+		// When there are no users
+		let res = txn.all_ns_users("ns").await.unwrap();
+		assert_eq!(res.len(), 0);
+
+		// When there are users
+		let data = DefineUserStatement {
+			name: "user".into(),
+			base: Base::Ns,
+			..Default::default()
+		};
+
+		let key1 = crate::key::namespace::us::new("ns", "user1");
+		let key2 = crate::key::namespace::us::new("ns", "user2");
+		let _ = txn.set(key1, data.to_owned()).await.unwrap();
+		let _ = txn.set(key2, data.to_owned()).await.unwrap();
+		let res = txn.all_ns_users("ns").await.unwrap();
+
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0], data);
+	}
+
+	#[tokio::test]
+	async fn test_db_users() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let mut txn = ds.transaction(true, false).await.unwrap();
+
+		// When there are no users
+		let res = txn.all_db_users("ns", "db").await.unwrap();
+		assert_eq!(res.len(), 0);
+
+		// When there are users
+		let data = DefineUserStatement {
+			name: "user".into(),
+			base: Base::Db,
+			..Default::default()
+		};
+
+		let key1 = crate::key::database::us::new("ns", "db", "user1");
+		let key2 = crate::key::database::us::new("ns", "db", "user2");
+		let _ = txn.set(key1, data.to_owned()).await.unwrap();
+		let _ = txn.set(key2, data.to_owned()).await.unwrap();
+		let res = txn.all_db_users("ns", "db").await.unwrap();
+
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0], data);
 	}
 }

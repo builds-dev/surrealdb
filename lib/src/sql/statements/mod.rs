@@ -1,3 +1,4 @@
+pub(crate) mod analyze;
 pub(crate) mod begin;
 pub(crate) mod cancel;
 pub(crate) mod commit;
@@ -15,6 +16,7 @@ pub(crate) mod relate;
 pub(crate) mod remove;
 pub(crate) mod select;
 pub(crate) mod set;
+pub(crate) mod show;
 pub(crate) mod sleep;
 pub(crate) mod update;
 pub(crate) mod yuse;
@@ -37,6 +39,7 @@ pub use self::set::SetStatement;
 pub use self::update::UpdateStatement;
 pub use self::yuse::UseStatement;
 
+pub use self::define::DefineAnalyzerStatement;
 pub use self::define::DefineDatabaseStatement;
 pub use self::define::DefineEventStatement;
 pub use self::define::DefineFieldStatement;
@@ -49,6 +52,7 @@ pub use self::define::DefineScopeStatement;
 pub use self::define::DefineStatement;
 pub use self::define::DefineTableStatement;
 pub use self::define::DefineTokenStatement;
+pub use self::define::DefineUserStatement;
 
 pub use self::remove::RemoveDatabaseStatement;
 pub use self::remove::RemoveEventStatement;
@@ -62,3 +66,4 @@ pub use self::remove::RemoveScopeStatement;
 pub use self::remove::RemoveStatement;
 pub use self::remove::RemoveTableStatement;
 pub use self::remove::RemoveTokenStatement;
+pub use self::remove::RemoveUserStatement;

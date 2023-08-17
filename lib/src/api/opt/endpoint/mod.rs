@@ -11,12 +11,17 @@ mod indxdb;
 mod mem;
 #[cfg(feature = "kv-rocksdb")]
 mod rocksdb;
+#[cfg(feature = "kv-speedb")]
+mod speedb;
 #[cfg(feature = "kv-tikv")]
 mod tikv;
 
 use crate::api::Connection;
 use crate::api::Result;
+use crate::iam::Level;
 use url::Url;
+
+use super::Config;
 
 /// A server address used to connect to the server
 #[derive(Debug)]
@@ -24,9 +29,14 @@ use url::Url;
 pub struct Endpoint {
 	pub(crate) endpoint: Url,
 	#[allow(dead_code)] // used by the embedded database
-	pub(crate) strict: bool,
+	pub(crate) config: Config,
 	#[cfg(any(feature = "native-tls", feature = "rustls"))]
 	pub(crate) tls_config: Option<super::Tls>,
+	// Only used by the local engines
+	// `Level::No` in this context means no authentication information was configured
+	pub(crate) auth: Level,
+	pub(crate) username: String,
+	pub(crate) password: String,
 }
 
 /// A trait for converting inputs to a server address object

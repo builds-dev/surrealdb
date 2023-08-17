@@ -70,9 +70,6 @@ use tokio::io::AsyncWrite;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncWriteExt;
 
-#[cfg(not(target_arch = "wasm32"))]
-const LOG: &str = "surrealdb::api::engine::local";
-
 /// In-memory database
 ///
 /// # Examples
@@ -80,11 +77,12 @@ const LOG: &str = "surrealdb::api::engine::local";
 /// Instantiating a global instance
 ///
 /// ```
+/// use once_cell::sync::Lazy;
 /// use surrealdb::{Result, Surreal};
 /// use surrealdb::engine::local::Db;
 /// use surrealdb::engine::local::Mem;
 ///
-/// static DB: Surreal<Db> = Surreal::init();
+/// static DB: Lazy<Surreal<Db>> = Lazy::new(Surreal::init);
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
@@ -195,6 +193,41 @@ pub struct File;
 #[derive(Debug)]
 pub struct RocksDb;
 
+/// SpeeDB database
+///
+/// # Examples
+///
+/// Instantiating a SpeeDB-backed instance
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() -> surrealdb::Result<()> {
+/// use surrealdb::Surreal;
+/// use surrealdb::engine::local::SpeeDb;
+///
+/// let db = Surreal::new::<SpeeDb>("temp.db").await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Instantiating a SpeeDB-backed strict instance
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() -> surrealdb::Result<()> {
+/// use surrealdb::opt::Strict;
+/// use surrealdb::Surreal;
+/// use surrealdb::engine::local::SpeeDb;
+///
+/// let db = Surreal::new::<SpeeDb>(("temp.db", Strict)).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "kv-speedb")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kv-speedb")))]
+#[derive(Debug)]
+pub struct SpeeDb;
+
 /// IndxDB database
 ///
 /// # Examples
@@ -302,9 +335,6 @@ pub struct TiKv;
 pub struct FDb;
 
 /// An embedded database
-///
-/// Authentication methods (`signup`, `signin`, `authentication` and `invalidate`) are not availabe
-/// on `Db`
 #[derive(Debug, Clone)]
 pub struct Db {
 	pub(crate) method: crate::api::conn::Method,
@@ -314,7 +344,7 @@ impl Surreal<Db> {
 	/// Connects to a specific database endpoint, saving the connection on the static client
 	pub fn connect<P>(&self, address: impl IntoEndpoint<P, Client = Db>) -> Connect<Db, ()> {
 		Connect {
-			router: Some(&self.router),
+			router: self.router.clone(),
 			address: address.into_endpoint(),
 			capacity: 0,
 			client: PhantomData,
@@ -369,7 +399,6 @@ async fn router(
 	kvs: &Datastore,
 	session: &mut Session,
 	vars: &mut BTreeMap<String, Value>,
-	strict: bool,
 ) -> Result<DbResponse> {
 	let mut params = param.other;
 
@@ -390,48 +419,73 @@ async fn router(
 			}
 			Ok(DbResponse::Other(Value::None))
 		}
-		Method::Signin | Method::Signup | Method::Authenticate | Method::Invalidate => {
-			unreachable!()
+		Method::Signup => {
+			let credentials = match &mut params[..] {
+				[Value::Object(credentials)] => mem::take(credentials),
+				_ => unreachable!(),
+			};
+			let response = crate::iam::signup::signup(kvs, session, credentials).await?;
+			Ok(DbResponse::Other(response.into()))
+		}
+		Method::Signin => {
+			let credentials = match &mut params[..] {
+				[Value::Object(credentials)] => mem::take(credentials),
+				_ => unreachable!(),
+			};
+			let response = crate::iam::signin::signin(kvs, session, credentials).await?;
+			Ok(DbResponse::Other(response.into()))
+		}
+		Method::Authenticate => {
+			let token = match &mut params[..] {
+				[Value::Strand(Strand(token))] => mem::take(token),
+				_ => unreachable!(),
+			};
+			crate::iam::verify::token(kvs, session, &token).await?;
+			Ok(DbResponse::Other(Value::None))
+		}
+		Method::Invalidate => {
+			crate::iam::clear::clear(session)?;
+			Ok(DbResponse::Other(Value::None))
 		}
 		Method::Create => {
 			let statement = create_statement(&mut params);
 			let query = Query(Statements(vec![Statement::Create(statement)]));
-			let response = kvs.process(query, &*session, Some(vars.clone()), strict).await?;
+			let response = kvs.process(query, &*session, Some(vars.clone())).await?;
 			let value = take(true, response).await?;
 			Ok(DbResponse::Other(value))
 		}
 		Method::Update => {
 			let (one, statement) = update_statement(&mut params);
 			let query = Query(Statements(vec![Statement::Update(statement)]));
-			let response = kvs.process(query, &*session, Some(vars.clone()), strict).await?;
+			let response = kvs.process(query, &*session, Some(vars.clone())).await?;
 			let value = take(one, response).await?;
 			Ok(DbResponse::Other(value))
 		}
 		Method::Patch => {
 			let (one, statement) = patch_statement(&mut params);
 			let query = Query(Statements(vec![Statement::Update(statement)]));
-			let response = kvs.process(query, &*session, Some(vars.clone()), strict).await?;
+			let response = kvs.process(query, &*session, Some(vars.clone())).await?;
 			let value = take(one, response).await?;
 			Ok(DbResponse::Other(value))
 		}
 		Method::Merge => {
 			let (one, statement) = merge_statement(&mut params);
 			let query = Query(Statements(vec![Statement::Update(statement)]));
-			let response = kvs.process(query, &*session, Some(vars.clone()), strict).await?;
+			let response = kvs.process(query, &*session, Some(vars.clone())).await?;
 			let value = take(one, response).await?;
 			Ok(DbResponse::Other(value))
 		}
 		Method::Select => {
 			let (one, statement) = select_statement(&mut params);
 			let query = Query(Statements(vec![Statement::Select(statement)]));
-			let response = kvs.process(query, &*session, Some(vars.clone()), strict).await?;
+			let response = kvs.process(query, &*session, Some(vars.clone())).await?;
 			let value = take(one, response).await?;
 			Ok(DbResponse::Other(value))
 		}
 		Method::Delete => {
 			let (one, statement) = delete_statement(&mut params);
 			let query = Query(Statements(vec![Statement::Delete(statement)]));
-			let response = kvs.process(query, &*session, Some(vars.clone()), strict).await?;
+			let response = kvs.process(query, &*session, Some(vars.clone())).await?;
 			let value = take(one, response).await?;
 			Ok(DbResponse::Other(value))
 		}
@@ -440,7 +494,7 @@ async fn router(
 				Some((query, mut bindings)) => {
 					let mut vars = vars.clone();
 					vars.append(&mut bindings);
-					kvs.process(query, &*session, Some(vars), strict).await?
+					kvs.process(query, &*session, Some(vars)).await?
 				}
 				None => unreachable!(),
 			};
@@ -459,75 +513,89 @@ async fn router(
 			// Write to channel.
 			async fn export_with_err(
 				kvs: &Datastore,
+				sess: &Session,
 				ns: String,
 				db: String,
 				chn: channel::Sender<Vec<u8>>,
 			) -> std::result::Result<(), crate::Error> {
-				kvs.export(ns, db, chn).await.map_err(|error| {
-					error!(target: LOG, "{error}");
+				let export = kvs.prepare_export(sess, ns, db, chn).await.map_err(|error| {
+					error!("Error preparing export: {error}");
+					crate::Error::Db(error)
+				})?;
+
+				export.await.map_err(|error| {
+					error!("Error processing export: {error}");
 					crate::Error::Db(error)
 				})
 			}
+			match (param.file, param.send) {
+				(None, None) => panic!("Expected file or channel, neither found"),
+				(Some(_), Some(_)) => panic!("Expected file or channel, found both"),
+				(Some(path), None) => {
+					let export = export_with_err(kvs, session, ns, db, tx);
 
-			let export = export_with_err(kvs, ns, db, tx);
+					// Read from channel and write to pipe.
+					let bridge = async move {
+						while let Ok(value) = rx.recv().await {
+							if writer.write_all(&value).await.is_err() {
+								// Broken pipe. Let either side's error be propagated.
+								break;
+							}
+						}
+						Ok(())
+					};
 
-			// Read from channel and write to pipe.
-			let bridge = async move {
-				while let Ok(value) = rx.recv().await {
-					if writer.write_all(&value).await.is_err() {
-						// Broken pipe. Let either side's error be propagated.
-						break;
-					}
-				}
-				Ok(())
-			};
+					// Output to stdout or file.
+					let mut output: Box<dyn AsyncWrite + Unpin + Send> =
+						match path.to_str().unwrap() {
+							"-" => Box::new(io::stdout()),
+							_ => {
+								let file = match OpenOptions::new()
+									.write(true)
+									.create(true)
+									.truncate(true)
+									.open(&path)
+									.await
+								{
+									Ok(path) => path,
+									Err(error) => {
+										return Err(Error::FileOpen {
+											path,
+											error,
+										}
+										.into());
+									}
+								};
+								Box::new(file)
+							}
+						};
 
-			// Output to stdout or file.
-			let path = param.file.expect("file to export into");
-			let mut output: Box<dyn AsyncWrite + Unpin + Send> = match path.to_str().unwrap() {
-				"-" => Box::new(io::stdout()),
-				_ => {
-					let file = match OpenOptions::new()
-						.write(true)
-						.create(true)
-						.truncate(true)
-						.open(&path)
-						.await
+					// Copy from pipe to output.
+					async fn copy_with_err<'a, R, W>(
+						path: PathBuf,
+						reader: &'a mut R,
+						writer: &'a mut W,
+					) -> std::result::Result<(), crate::Error>
+					where
+						R: tokio::io::AsyncRead + Unpin + ?Sized,
+						W: tokio::io::AsyncWrite + Unpin + ?Sized,
 					{
-						Ok(path) => path,
-						Err(error) => {
-							return Err(Error::FileOpen {
+						io::copy(reader, writer).await.map(|_| ()).map_err(|error| {
+							crate::Error::Api(crate::error::Api::FileRead {
 								path,
 								error,
-							}
-							.into());
-						}
-					};
-					Box::new(file)
+							})
+						})
+					}
+
+					let copy = copy_with_err(path, &mut reader, &mut output);
+
+					tokio::try_join!(export, bridge, copy).map(|_| DbResponse::Other(Value::None))
 				}
-			};
-
-			// Copy from pipe to output.
-			async fn copy_with_err<'a, R, W>(
-				path: PathBuf,
-				reader: &'a mut R,
-				writer: &'a mut W,
-			) -> std::result::Result<(), crate::Error>
-			where
-				R: tokio::io::AsyncRead + Unpin + ?Sized,
-				W: tokio::io::AsyncWrite + Unpin + ?Sized,
-			{
-				io::copy(reader, writer).await.map(|_| ()).map_err(|error| {
-					crate::Error::Api(crate::error::Api::FileRead {
-						path,
-						error,
-					})
-				})
+				(None, Some(chn)) => export_with_err(kvs, session, ns, db, chn)
+					.await
+					.map(|_| DbResponse::Other(Value::None)),
 			}
-
-			let copy = copy_with_err(path, &mut reader, &mut output);
-
-			tokio::try_join!(export, bridge, copy).map(|_| DbResponse::Other(Value::None))
 		}
 		#[cfg(not(target_arch = "wasm32"))]
 		Method::Import => {
@@ -550,7 +618,7 @@ async fn router(
 				}
 				.into());
 			}
-			let responses = kvs.execute(&statements, &*session, Some(vars.clone()), strict).await?;
+			let responses = kvs.execute(&statements, &*session, Some(vars.clone())).await?;
 			for response in responses {
 				response.result?;
 			}
@@ -580,7 +648,7 @@ async fn router(
 			let mut vars = BTreeMap::new();
 			vars.insert("table".to_owned(), table);
 			let response = kvs
-				.execute("LIVE SELECT * FROM type::table($table)", &*session, Some(vars), strict)
+				.execute("LIVE SELECT * FROM type::table($table)", &*session, Some(vars))
 				.await?;
 			let value = take(true, response).await?;
 			Ok(DbResponse::Other(value))
@@ -592,8 +660,7 @@ async fn router(
 			};
 			let mut vars = BTreeMap::new();
 			vars.insert("id".to_owned(), id);
-			let response =
-				kvs.execute("KILL type::string($id)", &*session, Some(vars), strict).await?;
+			let response = kvs.execute("KILL type::string($id)", &*session, Some(vars)).await?;
 			let value = take(true, response).await?;
 			Ok(DbResponse::Other(value))
 		}

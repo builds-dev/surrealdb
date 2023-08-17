@@ -17,8 +17,8 @@ async fn complex_ids() -> Result<(), Error> {
 		SELECT * FROM person;
 	"#;
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
-	let res = &mut dbs.execute(&sql, &ses, None, false).await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 7);
 	//
 	let tmp = res.remove(0).result?;
@@ -95,8 +95,8 @@ async fn complex_strings() -> Result<(), Error> {
 		RETURN "String with some 'single' and \"double\" quoted characters";
 	"#;
 	let dbs = Datastore::new("memory").await?;
-	let ses = Session::for_kv().with_ns("test").with_db("test");
-	let res = &mut dbs.execute(&sql, &ses, None, false).await?;
+	let ses = Session::owner().with_ns("test").with_db("test");
+	let res = &mut dbs.execute(sql, &ses, None).await?;
 	assert_eq!(res.len(), 5);
 	//
 	let tmp = res.remove(0).result?;

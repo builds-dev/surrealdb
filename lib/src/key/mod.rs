@@ -1,58 +1,67 @@
+//! How the keys are structured in the key value store
 ///
-/// KV              /
-/// NS              /!ns{ns}
+/// crate::key::root::all                /
+/// crate::key::root::hb                 /!hb{ts}/{nd}
+/// crate::key::root::nd                 /!nd{nd}
+/// crate::key::root::ns                 /!ns{ns}
 ///
-/// Namespace       /*{ns}
-/// NL              /*{ns}!nl{us}
-/// NT              /*{ns}!nt{tk}
-/// DB              /*{ns}!db{db}
+/// crate::key::node::all                /${nd}
+/// crate::key::node::lq                 /${nd}!lq{lq}{ns}{db}
 ///
-/// Database        /*{ns}*{db}
-/// DL              /*{ns}*{db}!dl{us}
-/// DT              /*{ns}*{db}!dt{tk}
-/// PA              /*{ns}*{db}!pa{pa}
-/// SC              /*{ns}*{db}!sc{sc}
-/// TB              /*{ns}*{db}!tb{tb}
-/// LQ              /*{ns}*{db}!lq{lq}
+/// crate::key::namespace::all           /*{ns}
+/// crate::key::namespace::db            /*{ns}!db{db}
+/// crate::key::namespace::lg            /*{ns}!lg{lg}
+/// crate::key::namespace::tk            /*{ns}!tk{tk}
 ///
-/// Scope           /*{ns}*{db}±{sc}
-/// ST              /*{ns}*{db}±{sc}!st{tk}
+/// crate::key::database::all            /*{ns}*{db}
+/// crate::key::database::az             /*{ns}*{db}!az{az}
+/// crate::key::database::fc             /*{ns}*{db}!fn{fc}
+/// crate::key::database::lg             /*{ns}*{db}!lg{lg}
+/// crate::key::database::pa             /*{ns}*{db}!pa{pa}
+/// crate::key::database::sc             /*{ns}*{db}!sc{sc}
+/// crate::key::database::tb             /*{ns}*{db}!tb{tb}
+/// crate::key::database::tk             /*{ns}*{db}!tk{tk}
+/// crate::key::database::ts             /*{ns}*{db}!ts{ts}
+/// crate::key::database::vs             /*{ns}*{db}!vs
 ///
-/// Table           /*{ns}*{db}*{tb}
-/// EV              /*{ns}*{db}*{tb}!ev{ev}
-/// FD              /*{ns}*{db}*{tb}!fd{fd}
-/// FT              /*{ns}*{db}*{tb}!ft{ft}
-/// IX              /*{ns}*{db}*{tb}!ix{ix}
-/// LV              /*{ns}*{db}*{tb}!lv{lv}
+/// crate::key::scope::all               /*{ns}*{db}±{sc}
+/// crate::key::scope::tk                /*{ns}*{db}±{sc}!tk{tk}
 ///
-/// Thing           /*{ns}*{db}*{tb}*{id}
+/// crate::key::table::all               /*{ns}*{db}*{tb}
+/// crate::key::table::ev                /*{ns}*{db}*{tb}!ev{ev}
+/// crate::key::table::fd                /*{ns}*{db}*{tb}!fd{fd}
+/// crate::key::table::ft                /*{ns}*{db}*{tb}!ft{ft}
+/// crate::key::table::ix                /*{ns}*{db}*{tb}!ix{ix}
+/// crate::key::table::lq                /*{ns}*{db}*{tb}!lq{lq}
 ///
-/// Graph           /*{ns}*{db}*{tb}~{id}{eg}{fk}
+/// crate::key::index::all               /*{ns}*{db}*{tb}+{ix}
+/// crate::key::index::bc                /*{ns}*{db}*{tb}+{ix}!bc{id}
+/// crate::key::index::bd                /*{ns}*{db}*{tb}+{ix}!bd{id}
+/// crate::key::index::bf                /*{ns}*{db}*{tb}+{ix}!bf{id}
+/// crate::key::index::bi                /*{ns}*{db}*{tb}+{ix}!bi{id}
+/// crate::key::index::bk                /*{ns}*{db}*{tb}+{ix}!bk{id}
+/// crate::key::index::bl                /*{ns}*{db}*{tb}+{ix}!bl{id}
+/// crate::key::index::bo                /*{ns}*{db}*{tb}+{ix}!bo{id}
+/// crate::key::index::bp                /*{ns}*{db}*{tb}+{ix}!bp{id}
+/// crate::key::index::bs                /*{ns}*{db}*{tb}+{ix}!bs
+/// crate::key::index::bt                /*{ns}*{db}*{tb}+{ix}!bt{id}
+/// crate::key::index::bu                /*{ns}*{db}*{tb}+{ix}!bu{id}
+/// crate::key::index                    /*{ns}*{db}*{tb}+{ix}*{fd}{id}
 ///
-/// Index           /*{ns}*{db}*{tb}¤{ix}{fd}{id}
+/// crate::key::change                   /*{ns}*{db}#{ts}
 ///
-pub mod database; // Stores the key prefix for all keys under a database
-pub mod db; // Stores a DEFINE DATABASE config definition
-pub mod dl; // Stores a DEFINE LOGIN ON DATABASE config definition
-pub mod dt; // Stores a DEFINE LOGIN ON DATABASE config definition
-pub mod ev; // Stores a DEFINE EVENT config definition
-pub mod fc; // Stores a DEFINE FUNCTION config definition
-pub mod fd; // Stores a DEFINE FIELD config definition
-pub mod ft; // Stores a DEFINE TABLE AS config definition
-pub mod graph; // Stores a graph edge pointer
-pub mod index; // Stores an index entry
-pub mod ix; // Stores a DEFINE INDEX config definition
-pub mod kv; // Stores the key prefix for all keys
-pub mod lq; // Stores a LIVE SELECT query definition on the database
-pub mod lv; // Stores a LIVE SELECT query definition on the table
-pub mod namespace; // Stores the key prefix for all keys under a namespace
-pub mod nl; // Stores a DEFINE LOGIN ON NAMESPACE config definition
-pub mod ns; // Stores a DEFINE NAMESPACE config definition
-pub mod nt; // Stores a DEFINE TOKEN ON NAMESPACE config definition
-pub mod pa; // Stores a DEFINE PARAM config definition
-pub mod sc; // Stores a DEFINE SCOPE config definition
-pub mod scope; // Stores the key prefix for all keys under a scope
-pub mod st; // Stores a DEFINE TOKEN ON SCOPE config definition
-pub mod table; // Stores the key prefix for all keys under a table
-pub mod tb; // Stores a DEFINE TABLE config definition
-pub mod thing; // Stores a record id
+/// crate::key::thing                    /*{ns}*{db}*{tb}*{id}
+///
+/// crate::key::graph                    /*{ns}*{db}*{tb}~{id}{eg}{fk}
+///
+pub mod change;
+pub mod database;
+pub mod debug;
+pub mod graph;
+pub mod index;
+pub mod namespace;
+pub mod node;
+pub mod root;
+pub mod scope;
+pub mod table;
+pub mod thing;

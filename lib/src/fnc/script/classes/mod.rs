@@ -1,7 +1,13 @@
-pub mod blob;
+use js::{Class, Ctx, Result};
+
 pub mod duration;
-pub mod headers;
 pub mod record;
-pub mod request;
-pub mod response;
 pub mod uuid;
+
+pub fn init(ctx: &Ctx<'_>) -> Result<()> {
+	let globals = ctx.globals();
+	Class::<duration::Duration>::define(&globals)?;
+	Class::<record::Record>::define(&globals)?;
+	Class::<uuid::Uuid>::define(&globals)?;
+	Ok(())
+}

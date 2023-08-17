@@ -16,11 +16,12 @@ use crate::api::opt::Tls;
 use crate::api::DbResponse;
 #[allow(unused_imports)] // used by the DB engines
 use crate::api::ExtraFeatures;
+use crate::api::OnceLockExt;
 use crate::api::Result;
 use crate::api::Surreal;
+#[allow(unused_imports)]
 use crate::error::Db as DbError;
 use flume::Receiver;
-use once_cell::sync::OnceCell;
 #[cfg(feature = "protocol-http")]
 use reqwest::ClientBuilder;
 use std::collections::HashSet;
@@ -29,6 +30,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
+use std::sync::OnceLock;
 #[cfg(feature = "protocol-ws")]
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 #[cfg(feature = "protocol-ws")]
@@ -103,6 +105,21 @@ impl Connection for Any {
 					.into());
 				}
 
+				"speedb" => {
+					#[cfg(feature = "kv-speedb")]
+					{
+						features.insert(ExtraFeatures::Backup);
+						engine::local::native::router(address, conn_tx, route_rx);
+						conn_rx.into_recv_async().await??
+					}
+
+					#[cfg(not(feature = "kv-speedb"))]
+					return Err(DbError::Ds(
+						"Cannot connect to the `speedb` storage engine as it is not enabled in this build of SurrealDB".to_owned(),
+					)
+					.into());
+				}
+
 				"tikv" => {
 					#[cfg(feature = "kv-tikv")]
 					{
@@ -120,7 +137,6 @@ impl Connection for Any {
 				"http" | "https" => {
 					#[cfg(feature = "protocol-http")]
 					{
-						features.insert(ExtraFeatures::Auth);
 						features.insert(ExtraFeatures::Backup);
 						let headers = http::default_headers();
 						#[allow(unused_mut)]
@@ -153,7 +169,6 @@ impl Connection for Any {
 				"ws" | "wss" => {
 					#[cfg(feature = "protocol-ws")]
 					{
-						features.insert(ExtraFeatures::Auth);
 						let url = address.endpoint.join(engine::remote::ws::PATH)?;
 						#[cfg(any(feature = "native-tls", feature = "rustls"))]
 						let maybe_connector = address.tls_config.map(Connector::from);
@@ -197,7 +212,7 @@ impl Connection for Any {
 			}
 
 			Ok(Surreal {
-				router: OnceCell::with_value(Arc::new(Router {
+				router: Arc::new(OnceLock::with_value(Router {
 					features,
 					conn: PhantomData,
 					sender: route_tx,

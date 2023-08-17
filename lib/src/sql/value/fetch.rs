@@ -1,6 +1,5 @@
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
 use crate::err::Error;
 use crate::sql::edges::Edges;
 use crate::sql::field::{Field, Fields};
@@ -34,6 +33,10 @@ impl Value {
 						Some(v) => v.fetch(ctx, opt, txn, path.next()).await,
 						None => Ok(()),
 					},
+					Part::Index(i) => match v.get_mut(&i.to_string()) {
+						Some(v) => v.fetch(ctx, opt, txn, path.next()).await,
+						None => Ok(()),
+					},
 					Part::All => self.fetch(ctx, opt, txn, path.next()).await,
 					_ => Ok(()),
 				},
@@ -60,7 +63,8 @@ impl Value {
 					Part::Where(w) => {
 						let path = path.next();
 						for v in v.iter_mut() {
-							if w.compute(ctx, opt, txn, Some(v)).await?.is_truthy() {
+							let cur = v.into();
+							if w.compute(ctx, opt, txn, Some(&cur)).await?.is_truthy() {
 								v.fetch(ctx, opt, txn, path).await?;
 							}
 						}

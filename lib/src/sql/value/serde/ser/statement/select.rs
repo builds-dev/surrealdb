@@ -1,6 +1,8 @@
 use crate::err::Error;
+use crate::sql::explain::Explain;
 use crate::sql::statements::SelectStatement;
 use crate::sql::value::serde::ser;
+use crate::sql::with::With;
 use crate::sql::Cond;
 use crate::sql::Fetchs;
 use crate::sql::Fields;
@@ -47,6 +49,7 @@ impl ser::Serializer for Serializer {
 pub struct SerializeSelectStatement {
 	expr: Option<Fields>,
 	what: Option<Values>,
+	with: Option<With>,
 	cond: Option<Cond>,
 	split: Option<Splits>,
 	group: Option<Groups>,
@@ -57,6 +60,7 @@ pub struct SerializeSelectStatement {
 	version: Option<Version>,
 	timeout: Option<Timeout>,
 	parallel: Option<bool>,
+	explain: Option<Explain>,
 }
 
 impl serde::ser::SerializeStruct for SerializeSelectStatement {
@@ -73,6 +77,9 @@ impl serde::ser::SerializeStruct for SerializeSelectStatement {
 			}
 			"what" => {
 				self.what = Some(Values(value.serialize(ser::value::vec::Serializer.wrap())?));
+			}
+			"with" => {
+				self.with = value.serialize(ser::with::opt::Serializer.wrap())?;
 			}
 			"cond" => {
 				self.cond = value.serialize(ser::cond::opt::Serializer.wrap())?;
@@ -104,6 +111,9 @@ impl serde::ser::SerializeStruct for SerializeSelectStatement {
 			"parallel" => {
 				self.parallel = Some(value.serialize(ser::primitive::bool::Serializer.wrap())?);
 			}
+			"explain" => {
+				self.explain = value.serialize(ser::explain::opt::Serializer.wrap())?;
+			}
 			key => {
 				return Err(Error::custom(format!("unexpected field `SelectStatement::{key}`")));
 			}
@@ -116,7 +126,9 @@ impl serde::ser::SerializeStruct for SerializeSelectStatement {
 			(Some(expr), Some(what), Some(parallel)) => Ok(SelectStatement {
 				expr,
 				what,
+				with: self.with,
 				parallel,
+				explain: self.explain,
 				cond: self.cond,
 				split: self.split,
 				group: self.group,
@@ -227,6 +239,46 @@ mod tests {
 	fn with_timeout() {
 		let stmt = SelectStatement {
 			timeout: Some(Default::default()),
+			..Default::default()
+		};
+		let value: SelectStatement = stmt.serialize(Serializer.wrap()).unwrap();
+		assert_eq!(value, stmt);
+	}
+
+	#[test]
+	fn with_explain() {
+		let stmt = SelectStatement {
+			explain: Some(Default::default()),
+			..Default::default()
+		};
+		let value: SelectStatement = stmt.serialize(Serializer.wrap()).unwrap();
+		assert_eq!(value, stmt);
+	}
+
+	#[test]
+	fn with_explain_full() {
+		let stmt = SelectStatement {
+			explain: Some(Explain(true)),
+			..Default::default()
+		};
+		let value: SelectStatement = stmt.serialize(Serializer.wrap()).unwrap();
+		assert_eq!(value, stmt);
+	}
+
+	#[test]
+	fn with_with_noindex() {
+		let stmt = SelectStatement {
+			with: Some(With::NoIndex),
+			..Default::default()
+		};
+		let value: SelectStatement = stmt.serialize(Serializer.wrap()).unwrap();
+		assert_eq!(value, stmt);
+	}
+
+	#[test]
+	fn with_with_index() {
+		let stmt = SelectStatement {
+			with: Some(With::Index(vec!["uniq".to_string(), "ft".to_string(), "idx".to_string()])),
 			..Default::default()
 		};
 		let value: SelectStatement = stmt.serialize(Serializer.wrap()).unwrap();
