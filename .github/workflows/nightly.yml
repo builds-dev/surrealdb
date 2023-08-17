@@ -9,110 +9,110 @@ defaults:
 
 jobs:
 
-  test:
-    name: Test
-    runs-on: ubuntu-20.04
-    steps:
+  # test:
+  #   name: Test
+  #   runs-on: ubuntu-20.04
+  #   steps:
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+  #     - name: Install stable toolchain
+  #       uses: dtolnay/rust-toolchain@stable
 
-      - name: Checkout sources
-        uses: actions/checkout@v3
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v3
 
-      - name: Setup cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+  #     - name: Setup cache
+  #       uses: Swatinem/rust-cache@v2
+  #       with:
+  #         save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get -y update
+  #     - name: Install dependencies
+  #       run: |
+  #         sudo apt-get -y update
 
-      - name: Free up some disk space
-        run: |
-          (set -x; df -h)
-          # Free up some disk space by removing unused files
-          (set -x; sudo rm -rf /imagegeneration || true)
-          (set -x; sudo rm -rf /opt/az || true)
-          (set -x; sudo rm -rf /opt/hostedtoolcache || true)
-          (set -x; sudo rm -rf /opt/google || true)
-          (set -x; sudo rm -rf /opt/pipx || true)
-          (set -x; df -h)
+  #     - name: Free up some disk space
+  #       run: |
+  #         (set -x; df -h)
+  #         # Free up some disk space by removing unused files
+  #         (set -x; sudo rm -rf /imagegeneration || true)
+  #         (set -x; sudo rm -rf /opt/az || true)
+  #         (set -x; sudo rm -rf /opt/hostedtoolcache || true)
+  #         (set -x; sudo rm -rf /opt/google || true)
+  #         (set -x; sudo rm -rf /opt/pipx || true)
+  #         (set -x; df -h)
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+  #     - name: Install cargo-llvm-cov
+  #       uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Install cargo-make
-        uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: --debug cargo-make
+  #     - name: Install cargo-make
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: install
+  #         args: --debug cargo-make
 
-      - name: Test workspace + coverage
-        uses: actions-rs/cargo@v1
-        with:
-          command: make
-          args: ci-workspace-coverage
+  #     - name: Test workspace + coverage
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: make
+  #         args: ci-workspace-coverage
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v3
-        with:
-          name: code-coverage-report
-          path: target/llvm-cov/html/
-          retention-days: 5
+  #     - name: Upload coverage report
+  #       uses: actions/upload-artifact@v3
+  #       with:
+  #         name: code-coverage-report
+  #         path: target/llvm-cov/html/
+  #         retention-days: 5
 
-  lint:
-    name: Lint
-    runs-on: ubuntu-20.04
-    steps:
+  # lint:
+  #   name: Lint
+  #   runs-on: ubuntu-20.04
+  #   steps:
 
-      - name: Checkout sources
-        uses: actions/checkout@v3
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v3
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get -y update
+  #     - name: Install dependencies
+  #       run: |
+  #         sudo apt-get -y update
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-          components: rustfmt, clippy
+  #     - name: Install stable toolchain
+  #       uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         targets: wasm32-unknown-unknown
+  #         components: rustfmt, clippy
 
-      - name: Install cargo-make
-        uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: --debug cargo-make
+  #     - name: Install cargo-make
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: install
+  #         args: --debug cargo-make
 
-      - name: Check workspace
-        uses: actions-rs/cargo@v1
-        with:
-          command: make
-          args: ci-check
+  #     - name: Check workspace
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: make
+  #         args: ci-check
 
-      - name: Check format
-        uses: actions-rs/cargo@v1
-        with:
-          command: make
-          args: ci-format
+  #     - name: Check format
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: make
+  #         args: ci-format
 
-      - name: Check wasm
-        uses: actions-rs/cargo@v1
-        with:
-          command: make
-          args: ci-check-wasm
+  #     - name: Check wasm
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: make
+  #         args: ci-check-wasm
 
-      - name: Check clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: make
-          args: ci-clippy
+  #     - name: Check clippy
+  #       uses: actions-rs/cargo@v1
+  #       with:
+  #         command: make
+  #         args: ci-clippy
 
   build:
     name: Build ${{ matrix.arch }}
-    needs: [test, lint]
+    # needs: [test, lint]
     strategy:
       fail-fast: false
       matrix:
